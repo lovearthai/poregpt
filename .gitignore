@@ -1,0 +1,91 @@
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+
+# ==============================
+# Virtual Environments
+# ==============================
+venv/
+ENV/
+.env
+.venv
+env.bak/
+venv.bak/
+
+# ==============================
+# IDE / Editors
+# ==============================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ==============================
+# Jupyter
+# ==============================
+.ipynb_checkpoints/
+*.ipynb
+
+# ==============================
+# Logs and Databases
+# ==============================
+*.log
+*.sqlite
+
+# ==============================
+# Model & Data Files (DO NOT COMMIT LARGE BINARY FILES)
+# ==============================
+*.pth
+*.pt
+*.npy
+*.npz
+*.h5
+*.onnx
+*.bin
+*.ckpt
+models/
+checkpoints/
+runs/
+data/
+*.fast5
+*.fastq
+*.fq
+*.bam
+*.sam
+*.jsonl.gz
+
+# ==============================
+# OS generated
+# ==============================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ==============================
+# Custom: PoreGPT / Nanopore Signal Tokenizer
+# ==============================
+# Test/demo data
+test_*.py
+demo.*
+example_*.py
+*.out

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "poregpt"
+version = "0.1.0"
+description = "Tokenize Nanopore FAST5 signals into chunks with normalization and filtering and feed tokens to LLM to learn basecall and classification"
+authors = [
+    { name = "Your Name" },
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "ont-fast5-api",
+    "numpy",
+    "scipy",
+    "pathos",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]        # 在当前目录下查找包
+include = ["poregpt*"]  # 匹配你的包名
+namespaces = false   # 如果你未来用命名空间包，可设为 true
