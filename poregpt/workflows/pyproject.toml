@@ -1,0 +1,31 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanopore_llm_workflow"
+version = "0.1.0"
+description = "High-level workflow for preprocessing Nanopore FAST5 signals for LLM training"
+readme = "README.md"
+authors = [{name = "zjhuadateam", email = "you@example.com"}]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "nanopore_signal_tokenizer",  # ← 关键依赖
+]
+
+[project.urls]
+Homepage = "https://github.com/lovearthai/nanopore_llm_workflow"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nanopore_llm_workflow*"]
+
+[project.scripts]
+# FAST5 预处理
+nanopore_llm_workflow-fast5-to-chunks = "nanopore_llm_workflow.cli.fast5.fast5_to_chunks:main"
