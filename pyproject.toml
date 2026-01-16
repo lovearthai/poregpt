@@ -30,3 +30,4 @@ include = ["poregpt*"]  # 匹配你的包名
 namespaces = false   # 如果你未来用命名空间包，可设为 true
 
 [project.scripts]
+poregpt-vqe-tokenize-fast5 = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_fast5:main"

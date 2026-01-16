@@ -8,11 +8,11 @@ from tqdm import tqdm
 import csv  # ✅ 新增：用于写入 CSV
 import time  # 确保已导入
 # 相对导入核心组件
-from ..utils.dataset import NanoporeSignalDataset
+from .dataset import NanoporeSignalDataset
 from .vq_model import NanoporeVQModel
 from typing import Dict, List
 import collections
-from ..utils.dwa import DynamicWeightAverager 
+from .dwa import DynamicWeightAverager 
 
 import argparse
 # ========== 评估函数（仅在 do_evaluate=True 时调用）==========

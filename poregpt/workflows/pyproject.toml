@@ -16,16 +16,14 @@ classifiers = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-    "nanopore_signal_tokenizer",  # ← 关键依赖
 ]
 
 [project.urls]
-Homepage = "https://github.com/lovearthai/nanopore_llm_workflow"
+Homepage = "https://github.com/lovearthai/poregpt/workflows"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nanopore_llm_workflow*"]
 
 [project.scripts]
-# FAST5 预处理
 nanopore_llm_workflow-fast5-to-chunks = "nanopore_llm_workflow.cli.fast5.fast5_to_chunks:main"
