@@ -1,4 +1,4 @@
-# 🧬 Nanopore Signal Tokenizer
+# 🧬PoreGPT
 
 > 将 Nanopore 原始电流信号（5 kHz）转换为离散 token 序列，用于下游语言模型（如 GPT）建模 DNA/RNA 序列。
 
