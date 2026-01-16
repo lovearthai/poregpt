@@ -1,5 +1,12 @@
-# 🧬PoreGPT
+# 🧬PoreGPT:  A GPT-based LLM for Nanopore signal
 
+PoreGPT 是首个直接在原始 Nanopore 电流信号（raw squiggle）上进行建模的大语言模型（LLM）框架。不同于传统方法依赖碱基识别（basecalling）后的 DNA 序列，PoreGPT 通过自研的 向量量化（VQ）信号 tokenizer，将连续、高维、含噪的电信号转化为离散 token 序列，从而在信号原生空间中学习序列-结构-修饰的深层关联。
+借助 Transformer 架构的强大泛化能力，PoreGPT 能够：
+直接从 raw signal 预测 DNA/RNA 序列（免 basecaller）
+检测表观遗传修饰（如 5mC、6mA）
+重建缺失信号片段
+为下游任务（如 variant calling、RNA isoform 分析）提供统一预训练表示
+PoreGPT 开启了“端到端信号智能”的新范式，让大模型真正“听见”DNA 的电流之声。
 > 将 Nanopore 原始电流信号（5 kHz）转换为离散 token 序列，用于下游语言模型（如 GPT）建模 DNA/RNA 序列。
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
