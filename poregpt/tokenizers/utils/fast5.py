@@ -9,11 +9,12 @@ import numpy as np
 import glob
 from ont_fast5_api.fast5_interface import get_fast5_file
 from .signal import (
+    nanopore_repair_errors, 
     nanopore_remove_spikes,
     nanopore_normalize_novel,
-    nanopore_normalize_huada,
-    nanopore_repair_errors 
-    )
+    nanopore_normalize_huada
+)
+
 from scipy.signal import medfilt
 from pathos.multiprocessing import ProcessPool
 from multiprocessing import cpu_count
