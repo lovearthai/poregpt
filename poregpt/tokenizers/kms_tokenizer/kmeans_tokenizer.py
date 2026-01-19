@@ -1,5 +1,6 @@
 
 from ...utils.signal import nanopore_process_signal
+from .process_data import sliding_window_chunks,process_read
 import faiss
 import gzip
 import json
@@ -7,6 +8,7 @@ from tqdm import tqdm
 from ont_fast5_api.fast5_interface import get_fast5_file
 import numpy as np
 from abc import ABC, abstractmethod
+import os
 
 # 基类：抽象类
 class InterfaceTokenizer(ABC):
@@ -64,43 +66,11 @@ class KmeansTokenizer(InterfaceTokenizer):
             index = cpu_index
         return index
     
-    def _sliding_window_chunks(self, signal):
-        """
-        对一维信号进行滑动窗口切片。
-
-        Args:
-            signal (np.ndarray): 一维归一化信号
-            window_size (int): 窗口长度
-            stride (int): 步长
-
-        Returns:
-            list of tuples: 每个元素是一个三元组 (start, end, vector)，其中：
-                            - start 是切片在原始信号中的起始索引
-                            - end 是切片在原始信号中的结束索引（不包含）
-                            - vector 是切片本身的值
-        """
-        n_points = len(signal)
-        if n_points < self.window_size:
-            return []
-
-        chunks_info = []
-        start = 0
-        while start + self.window_size <= n_points:
-            end = start + self.window_size
-            chunk = signal[start:end]
-            chunks_info.append((start, end, chunk))
-            start += self.stride
-        return chunks_info
 
     def tokenize_data(self, signal: np.ndarray) -> list:
         if signal.size == 0:
             return []
-        vec_list = []
-        chunks_info = self._sliding_window_chunks(signal)
-        for _, _, chunk in chunks_info:
-            if chunk.size == 0:
-                continue
-            vec_list.append(chunk)
+        vec_list = sliding_window_chunks(signal, self.window_size, self.stride)
         if not vec_list:
             return []
         try:
@@ -117,18 +87,15 @@ class KmeansTokenizer(InterfaceTokenizer):
 
 
     def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
-        try:
-            channel_info = read.handle[read.global_key + 'channel_id'].attrs
-            offset = int(channel_info['offset'])
-            scaling = channel_info['range'] / channel_info['digitisation']
-            raw = read.handle[read.raw_dataset_name][:]
-            signal_raw = np.array(scaling * (raw + offset), dtype=np.float32)
-            signal_processed = nanopore_process_signal(signal_raw,nanopore_signal_process_strategy)
-            return self.tokenize_data(signal_processed)
-        except Exception as e:
-            fast5_path = getattr(read.handle, 'filename', 'unknown.fast5')
-            print(f"❌ Error on read {read.read_id} in {fast5_path}: {e}")
+        signal_raw = process_read(read)
+        if signal_raw is None:
             return []
+
+        signal_processed = nanopore_process_signal(signal_raw,nanopore_signal_process_strategy)
+        if signal_processed is None:
+            return []
+        return self.tokenize_data(signal_processed)
+
 
  
     def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple"):
