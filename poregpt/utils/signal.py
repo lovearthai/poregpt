@@ -139,6 +139,7 @@ def _nanopore_remove_spikes(
     return cleaned
 
 def nanopore_process_signal(signal_raw,strategy="apple"):
+    signal_return = None
     if strategy == "stone":
         signal_return = _nanopore_normalize_huada(signal_raw)
     elif strategy == "apple":
