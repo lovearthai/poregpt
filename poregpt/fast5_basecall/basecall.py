@@ -16,11 +16,10 @@ import pandas as pd
 import glob
 from tqdm import tqdm
 from ont_fast5_api.fast5_interface import get_fast5_file
-# import nanopore_signal_tokenizer as nst
 import torch
 from typing import Dict, Optional, Tuple, Union, Literal, List
-from nanopore_signal_tokenizer import VQTokenizer
-from nanopore_signal_tokenizer import KmeansTokenizer
+# from ..tokenizers import VQTokenizer
+# from nanopore_signal_tokenizer import KmeansTokenizer
 import json
 import gzip
 
