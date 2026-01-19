@@ -1,13 +1,31 @@
 
-from .signal_normal import nanopore_normalize, nanopore_filter_signal
+from ...utils.signal import nanopore_process_signal
 import faiss
 import gzip
 import json
 from tqdm import tqdm
 from ont_fast5_api.fast5_interface import get_fast5_file
 import numpy as np
+from abc import ABC, abstractmethod
 
-class KmeansTokenizer:
+# 基类：抽象类
+class InterfaceTokenizer(ABC):
+    @abstractmethod
+    def tokenize_data(self, signal: np.ndarray) -> list:
+        """将原始信号数据转换为 token 字符串"""
+        pass
+
+    @abstractmethod
+    def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
+        """将测序读段（read）对象转换为 token 字符串"""
+        pass
+
+    @abstractmethod
+    def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple"):
+        """从 FAST5 文件中读取信号并保存 token 到输出路径"""
+        pass
+
+class KmeansTokenizer(InterfaceTokenizer):
     """
     Nanopore RVQ Tokenizer 封装类。
 
@@ -74,71 +92,58 @@ class KmeansTokenizer:
             start += self.stride
         return chunks_info
 
-    def tokenize_data(self, signal: np.ndarray) -> str:
-        # Normalize
-        norm_sig_no_filter = nanopore_normalize(signal)
-        norm_sig = nanopore_filter_signal(norm_sig_no_filter) # 进行去噪处理
-        if norm_sig.size == 0:
-            return ""
+    def tokenize_data(self, signal: np.ndarray) -> list:
+        if signal.size == 0:
+            return []
         vec_list = []
-        chunks_info = self._sliding_window_chunks(norm_sig)
+        chunks_info = self._sliding_window_chunks(signal)
         for _, _, chunk in chunks_info:
             if chunk.size == 0:
                 continue
             vec_list.append(chunk)
         if not vec_list:
-            return ""
+            return []
         try:
             X = np.stack(vec_list, axis=0).astype(np.float32)
         except Exception:
-            return ""
+            return []
         _, I = self.index.search(X, 1) # type: ignore
         cluster_ids = I[:, 0].tolist()
 
-        tokens = ''.join(f"<|bwav:{int(cid)}|>" for cid in cluster_ids)
+        parts = []
+        for token_id in cluster_ids:
+            parts.append(f"<|bwav:{int(token_id)}|>")
+        return parts
 
-        return tokens
 
-
-    def tokenize_read(self, read) -> str:
-        """
-        直接 tokenize 一个 ont_fast5_api read 对象，返回格式化 token 字符串。
-
-        Args:
-            read: fast5 read object
-            token_type: "L1", "L2", "L3", or "L4"
-
-        Returns:
-            str: formatted token string
-        """
-        # --- Scale ---
-        channel_info = read.handle[read.global_key + 'channel_id'].attrs
-        offset = int(channel_info['offset'])
-        scaling = channel_info['range'] / channel_info['digitisation']
-        raw = read.handle[read.raw_dataset_name][:]
-        scaled = np.array(scaling * (raw + offset), dtype=np.float32)
-
-        return self.tokenize_data(scaled)
+    def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
+        try:
+            channel_info = read.handle[read.global_key + 'channel_id'].attrs
+            offset = int(channel_info['offset'])
+            scaling = channel_info['range'] / channel_info['digitisation']
+            raw = read.handle[read.raw_dataset_name][:]
+            signal_raw = np.array(scaling * (raw + offset), dtype=np.float32)
+            signal_processed = nanopore_process_signal(signal_raw,nanopore_signal_process_strategy)
+            return self.tokenize_data(signal_processed)
+        except Exception as e:
+            fast5_path = getattr(read.handle, 'filename', 'unknown.fast5')
+            print(f"❌ Error on read {read.read_id} in {fast5_path}: {e}")
+            return []
 
  
-    def tokenize_fast5(self, fast5_path: str, output_path: str):
-        print(f"✅ Process {fast5_path}")
-        """内部方法：处理单个 FAST5 → JSONL.GZ"""
+    def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple"):
+        print(f"✅ Processing {fast5_path} with strategy{nanopore_signal_process_strategy}")
         results = []
         with get_fast5_file(fast5_path, mode="r") as f5:
-            for read in tqdm(f5.get_reads()):
+            for read in tqdm(f5.get_reads(), desc=os.path.basename(fast5_path)):
                 try:
-                    token_str = self.tokenize_read(read)
-    
-                    results.append({
-                        "id": read.read_id,
-                        "text": token_str
-                    })
+                    token_list = self.tokenize_read(read,nanopore_signal_process_strategy)
+                    token_str = "".join(token_list)
+                    results.append({"id": read.read_id, "text": token_str})
                 except Exception as e:
-                    print(f"❌ Error on read {read.read_id} in {fast5_path}: {e}")
+                    print(f"❌ Failed on read {read.read_id}: {e}")
                     continue
-    
-        # Save
+
         with gzip.open(output_path, 'wt', encoding='utf-8') as f:
             for item in results:
                 f.write(json.dumps(item) + '\n')
