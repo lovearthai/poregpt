@@ -22,9 +22,11 @@ export WANDB_API_KEY=748830e9b9acdf804bb0baad0eb82e6ca2592354
 # ----------------------------------------------------------------------------
 
 # 输入目录：包含预处理好的 .npy 信号片段文件（由 step01_fast5_to_chunks.py 生成）
-NPTY_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/train"
+TRAIN_NPTY_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/train"
+EVAL_NPTY_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/validation"
 # 输出模型保存路径（.pth 文件）
-OUTPUT_MODEL_PATH="models/nanopore_signal_tokenizer.pth"
+mkdir models
+OUTPUT_MODEL_PATH="models/porepgt_vqe_tokenizer"
 
 
 CHECKPOINT_PATH="models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
@@ -33,14 +35,22 @@ CHECKPOINT_PATH="models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
 BATCH_SIZE=32
 
 # 学习率（Adam 优化器）
+# scratch
+LR=0.0002  # 即 3e-4
+
+# init all
+#LR=0.00005  # 即 3e-4
+
+# init book
 #LR=0.0002  # 即 3e-4
-LR=0.0001  # 即 3e-4
+
 
 # 训练轮数（epochs）
 NUM_EPOCHS=50
 
 # VQ 码本大小（即词汇表大小，如 8192 = 2^13）
 CODEBOOK_SIZE=16384
+CODEBOOK_SIZE=65536
 
 # VQ 码本大小（即词汇表大小，如 8192 = 2^13）
 CODEBOOK_DIM=64
@@ -52,7 +62,7 @@ CHUNK_SIZE=12000
 NUM_WORKERS=16
 
 # 验证集大小（从数据中随机抽取多少样本用于评估）
-VAL_RATIO=0.01
+VAL_RATIO=0.1
 
 # 验证集大小（从数据中随机抽取多少样本用于评估）
 SAVE_CHECKPOINT_INTERVAL=500
@@ -64,14 +74,16 @@ DO_EVALUATE="true"  # 设为 "true" 启用 --do_evaluate，"false" 则不启用
 
 CNN_TYPE=1
 
-INIT_CODEBOOK_PATH="/mnt/gpudisk/dna_shards/train_features_clustered_10p_centroids_k16384.npy"
-# 
+INIT_CODEBOOK_PATH="/mnt/gpudisk/dna_shards/kmc_models_apple_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy"
+INIT_CODEBOOK_PATH="no_codebook"
+INIT_CNN_PATH="/mnt/gpudisk/dna_shards/cnn_models_apple_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
+INIT_CNN_PATH="no_cnn"
+
 VQ_TRAIN_COMMITMENT_WEIGHT=0.250
 VQ_TRAIN_ORTHOGONAL_WEIGHT=0.001
 VQ_TRAIN_DIVERSITY_WEIGHT=0.00001
 VQ_TRAIN_ORTHOGONAL_WEIGHT=0.000
 VQ_TRAIN_DIVERSITY_WEIGHT=0.00000
-
 
 # ----------------------------------------------------------------------------
 # 构建 --do_evaluate 参数
@@ -82,7 +94,6 @@ if [ "$DO_EVALUATE" = "true" ]; then
     EVALUATE_ARG="--do_evaluate"
 fi
 
-
 # ----------------------------------------------------------------------------
 # 构造完整的 Python 命令
 # 使用数组形式避免空格/引号问题，确保命令安全可靠
@@ -90,7 +101,8 @@ fi
 CMD=(
     torchrun --nproc_per_node=4  
     -m poregpt.tokenizers.vqe_tokenizer.vqe_train
-    --npy_dir "$NPTY_DIR"
+    --train_npy_dir "$TRAIN_NPTY_DIR"
+    --evaluation_npy_dir "$EVAL_NPTY_DIR"
     --output_model_path "$OUTPUT_MODEL_PATH"
     --batch_size "$BATCH_SIZE"
     --lr "$LR"
@@ -107,6 +119,8 @@ CMD=(
     --checkpoint_path $CHECKPOINT_PATH
     --cnn_type $CNN_TYPE
     --init_codebook_path $INIT_CODEBOOK_PATH
+    --cnn_checkpoint_path $INIT_CNN_PATH
+    --freeze_cnn 0
     $EVALUATE_ARG 
 )
 
@@ -119,7 +133,6 @@ echo ">>> Running VQ training command:"
 printf "%q " "${CMD[@]}"
 echo  # 换行
 echo "--------------------------------------------------"
-
 
 # ----------------------------------------------------------------------------
 # 执行训练命令

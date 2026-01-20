@@ -10,8 +10,8 @@ def main():
     parser.add_argument("--output_file", type=str, default=None, help="Output .jsonl.gz file path. If not provided, use <input>.jsonl.gz")
     parser.add_argument("--model_ckpt", type=str, default="nanopore_rvq_tokenizer.pth", help="Path to RVQ model checkpoint")
     parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID to use (e.g., 0, 1, 2, 3). Default: 0")
-    parser.add_argument("--medf", type=int, default=0, help="Median filter window size (odd int, e.g., 5). 0 to disable.")
-    parser.add_argument("--lpf", type=int, default=0, help="Low-pass filter cutoff frequency in Hz (e.g., 1000). 0 to disable.")
+    parser.add_argument("--signal_process_strategy", type=str, default="novel")
+    parser.add_argument("--token_batch_size", type=int, default=5000)
 
     args = parser.parse_args()
     print(args)
@@ -44,6 +44,7 @@ def main():
     tokenizer.tokenize_fast5(
         fast5_path=args.fast5_file,
         output_path=args.output_file,
+        nanopore_signal_process_strategy=args.signal_process_strategy
     )
 
     print("✅ Done.")

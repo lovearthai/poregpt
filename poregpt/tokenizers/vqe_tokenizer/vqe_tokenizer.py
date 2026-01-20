@@ -37,7 +37,7 @@ class VQETokenizer:
         self,
         model_ckpt: str = "nanopore_vq_tokenizer.pth",
         device: str = "cuda",
-        token_batch_size: int = 1000,
+        token_batch_size: int = 8000,
     ):
         # --- Device setup ---
         if device is None:
@@ -204,6 +204,81 @@ class VQETokenizer:
 
         return final_tokens.astype(np.int64)
 
+    import numpy as np
+    from typing import List
+
+    import numpy as np
+    from typing import List
+
+    def tokenize_signal_batched(self, 
+                           signal: np.ndarray, 
+                           signal_chunk_size: int, 
+                           signal_chunk_overlap_size: int, 
+                           max_batch_size: int) -> List[np.ndarray]:
+        """
+        将信号严格切分为等长块（不足长度的直接丢弃），并按批次进行推理。
+        使用 extend，返回的是一维列表（所有块的 tokens 连在一起）。
+        
+        Args:
+            signal: 输入的一维信号数组。
+            signal_chunk_size: 每个块的严格大小。
+            signal_chunk_overlap_size: 块之间的重叠大小。
+            max_batch_size: 每个推理批次的最大块数量。
+            
+        Returns:
+            List[np.ndarray]: 一维列表。每个元素是单个块的推理结果 (tokens)。
+                             (注意：不再是二维列表，所有批次的数据都被合并到了同一个列表中)
+        """
+    
+        if signal.ndim != 1:
+            raise ValueError("Signal must be 1D.")
+        
+        L = len(signal)
+        batched_results = [] # 初始化结果列表
+        
+        # --- 情况 1: 信号总长度小于一个块的大小 ---
+        if L < signal_chunk_size:
+            return batched_results
+
+        # --- 情况 2: 信号足够长，进行严格切分 ---
+        step_size = signal_chunk_size - signal_chunk_overlap_size
+        if step_size <= 0:
+            raise ValueError("signal_chunk_size must be greater than signal_chunk_overlap_size.")
+        
+        # 1. 第一阶段：严格切分 (不填充)
+        chunks = []
+        start = 0    
+        while start + signal_chunk_size <= L:
+            chunk = signal[start : start + signal_chunk_size]
+            chunks.append(chunk)
+            start += step_size
+
+        if not chunks:
+            return batched_results
+
+        # 2. 第二阶段：批量推理
+        for i in range(0, len(chunks), max_batch_size):
+            batch_chunks = chunks[i : i + max_batch_size]
+            
+            # --- 核心推理代码 ---
+            batch_np = np.array(batch_chunks)
+            x = torch.from_numpy(batch_np).float().unsqueeze(1).to(self.device)
+            
+            with torch.no_grad():
+                recon, tokens, loss, loss_breakdown = self.model(x) 
+            
+            tokens_np = tokens.cpu().numpy()
+            if tokens_np.ndim == 3:
+                tokens_np = tokens_np.squeeze(-1) # [B, T, 1] -> [B, T]
+            
+            # --- 修改点：使用 extend ---
+            # 将当前批次中每一个块的 tokens 结果直接添加到主列表中
+            # 这样做会“展平”批次结构，最终得到一个包含所有块结果的一维列表
+            batched_results.extend(tokens_np)
+            # -------------------------
+            
+        return batched_results # 返回 List[np.ndarray] (一维)
+
 
     # tokenize_data不支持任何归一化, medf, lpf等操作
     def tokenize_data(self, signal: np.ndarray) -> list:
@@ -214,6 +289,54 @@ class VQETokenizer:
         for token_id in flat_tokens:
             parts.append(f"<|bwav:{int(token_id)}|>")
         return parts
+
+    def tokenize_data_batched(self, 
+                 signal: np.ndarray, 
+                 signal_chunk_size: int, 
+                 signal_chunk_overlap_size: int, 
+                 max_batch_size: int,
+                 chunk_token_count: int) -> list:
+        """
+        使用批量推理函数获取 tokens，并进行严格校验与拼接。
+        
+        Args:
+            signal: 输入信号
+            signal_chunk_size: 信号块大小
+            signal_chunk_overlap_size: 重叠大小
+            max_batch_size: 最大批大小
+            chunk_token_count: 期望每个 chunk 输出的 token 数量 (用于校验)
+            
+        Returns:
+            list: 每个元素是一个字符串，由符合长度要求的 chunk tokens 拼接而成
+        """
+        
+        # 调用批量处理函数
+        chunks_tokens_list = self.tokenize_signal_batched(
+            signal=signal,
+            signal_chunk_size=signal_chunk_size,       
+            signal_chunk_overlap_size=signal_chunk_overlap_size, 
+            max_batch_size=max_batch_size
+        )
+        
+        # 如果没有结果，返回空列表
+        if not chunks_tokens_list:
+            return []
+
+        string_parts = []
+        for chunk_tokens in chunks_tokens_list:
+            # --- 新增校验逻辑 ---
+            # 检查当前 chunk 的 token 数量是否符合预期
+            if len(chunk_tokens) != chunk_token_count:
+                # 如果长度不符，可以选择跳过(this)、填充或报错
+                # 这里选择跳过，不加入结果列表
+                continue 
+            
+            # 1. 将每个 token ID 转换为字符串格式
+            token_strings = [f"<|bwav:{int(token_id)}|>" for token_id in chunk_tokens]
+            # 2. 使用 "".join() 拼接
+            joined_string = "".join(token_strings)
+            string_parts.append(joined_string)
+        return string_parts
 
     def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
         try:
@@ -228,6 +351,27 @@ class VQETokenizer:
             fast5_path = getattr(read.handle, 'filename', 'unknown.fast5')
             print(f"❌ Error on read {read.read_id} in {fast5_path}: {e}")
             return []
+    def tokenize_read_batched(self, read, 
+        nanopore_signal_process_strategy:str="apple",
+        # 新增参数：用于传递给 tokenize_data
+        signal_chunk_size: int = 40000,
+        signal_chunk_overlap_size: int = 10000,
+        max_batch_size: int = 32,
+        chunk_token_count: int = 8000 # 用于内部校验
+    ) -> list:
+        try:
+            channel_info = read.handle[read.global_key + 'channel_id'].attrs
+            offset = int(channel_info['offset'])
+            scaling = channel_info['range'] / channel_info['digitisation']
+            raw = read.handle[read.raw_dataset_name][:]
+            signal_raw = np.array(scaling * (raw + offset), dtype=np.float32)
+            signal_processed = nanopore_process_signal(signal_raw,nanopore_signal_process_strategy)
+            return self.tokenize_data(signal_processed)
+        except Exception as e:
+            fast5_path = getattr(read.handle, 'filename', 'unknown.fast5')
+            print(f"❌ Error on read {read.read_id} in {fast5_path}: {e}")
+            return []
+
 
     def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple"):
         print(f"✅ Processing {fast5_path} with strategy{nanopore_signal_process_strategy}")
@@ -242,6 +386,53 @@ class VQETokenizer:
                     print(f"❌ Failed on read {read.read_id}: {e}")
                     continue
 
+        with gzip.open(output_path, 'wt', encoding='utf-8') as f:
+            for item in results:
+                f.write(json.dumps(item) + '\n')
+        print(f"✅ Wrote {len(results)} reads to {output_path}")
+
+
+
+    def tokenize_fast5(self,
+        fast5_path: str,
+        output_path: str,
+        nanopore_signal_process_strategy="apple",
+        # 新增参数：用于传递给 tokenize_data
+        signal_chunk_size: int = 40000,
+        signal_chunk_overlap_size: int = 10000,
+        max_batch_size: int = 32,
+        chunk_token_count: int = 8000 # 用于内部校验
+    ):
+        print(f"✅ Processing {fast5_path} with strategy {nanopore_signal_process_strategy}")
+        results = []
+
+        with get_fast5_file(fast5_path, mode="r") as f5:
+            for read in tqdm(f5.get_reads(), desc=os.path.basename(fast5_path)):
+                try:
+                    # 调用 tokenize_data，传入所有必要的参数
+                    # 返回的是 List[str]，例如 ["<|bwav:1|><|bwav:2|>", "<|bwav:3|><|bwav:4|>"]
+                    chunked_token_strings = self.tokenize_read_batched(
+                        read=read,
+                        signal_chunk_size=signal_chunk_size,
+                        signal_chunk_overlap_size=signal_chunk_overlap_size,
+                        max_batch_size=max_batch_size,
+                        chunk_token_count=chunk_token_count
+                    )
+                    # --- 修改开始 ---
+                    # 循环每个分块字符串，作为独立行追加
+                    for chunk_token_str in chunked_token_strings:
+                        results.append({
+                            "id": read.read_id, 
+                            "text": chunk_token_str
+                        })
+                    # --- 修改结束 ---
+                    # 将多个 chunk 的字符串用空格（或其他分隔符）连接成一个完整的字符串
+                    # 如果不需要分隔符，使用 ""；如果需要区分 chunk 边界，建议使用 " " 或 "<|chunk_end|>"
+                except Exception as e:
+                    print(f"❌ Failed on read {read.read_id}: {e}")
+                    continue
+
+        # 写入文件
         with gzip.open(output_path, 'wt', encoding='utf-8') as f:
             for item in results:
                 f.write(json.dumps(item) + '\n')
