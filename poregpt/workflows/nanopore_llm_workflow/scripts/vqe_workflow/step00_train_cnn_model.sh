@@ -22,71 +22,44 @@ export WANDB_API_KEY=748830e9b9acdf804bb0baad0eb82e6ca2592354
 # ----------------------------------------------------------------------------
 
 # 输入目录：包含预处理好的 .npy 信号片段文件（由 step01_fast5_to_chunks.py 生成）
-TRAIN_NPTY_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/train"
-EVAL_NPTY_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/validation"
+NPTY_DIR="/mnt/nas_syy/dataset/huada_rna_80G/fast5_q85_chunks_med/fast5_chunks_w12k_split10k_memmap"
+VAL_DIR="/mnt/nas_syy/dataset/huada_rna_80G/fast5_q85_chunks_med/fast5_chunks_w12k_split10k_memmap"
+
+NPTY_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/train"
+VAL_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/validation"
 # 输出模型保存路径（.pth 文件）
-mkdir models
-OUTPUT_MODEL_PATH="models/porepgt_vqe_tokenizer"
+OUTPUT_MODEL_PATH="models/nanopore_signal_tokenizer.pth"
 
 
 CHECKPOINT_PATH="models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
 
 # 训练批大小（影响显存占用）
-
-# 当CODEBOOK_SIZE==65536时
-BATCH_SIZE=8
-
+BATCH_SIZE=2048
 # 学习率（Adam 优化器）
-# scratch
 LR=0.0002  # 即 3e-4
 
-# init all
-#LR=0.00005  # 即 3e-4
-
-# init book
-#LR=0.0002  # 即 3e-4
-
-
 # 训练轮数（epochs）
-NUM_EPOCHS=50
-
-# VQ 码本大小（即词汇表大小，如 8192 = 2^13）
-CODEBOOK_SIZE=16384
-CODEBOOK_SIZE=65536
-
-# VQ 码本大小（即词汇表大小，如 8192 = 2^13）
-CODEBOOK_DIM=64
-
+NUM_EPOCHS=200
 # 每个 .npy 文件的信号长度（必须与预处理时的 window_size 一致）
 CHUNK_SIZE=12000
-
 # 数据加载线程数（加速 I/O）
 NUM_WORKERS=16
-
 # 验证集大小（从数据中随机抽取多少样本用于评估）
-VAL_RATIO=0.1
-
+VAL_RATIO=0.5
 # 验证集大小（从数据中随机抽取多少样本用于评估）
-SAVE_CHECKPOINT_INTERVAL=500
-
+SAVE_CHECKPOINT_INTERVAL=50
 LOSS_LOG_INTERVAL=10
-
 # 是否启用 codebook 使用率评估（会额外计算并打印每个码字的使用频率）
 DO_EVALUATE="true"  # 设为 "true" 启用 --do_evaluate，"false" 则不启用
 
 CNN_TYPE=1
 
-INIT_CODEBOOK_PATH="/mnt/gpudisk/dna_shards/kmc_models_apple_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy"
-INIT_CODEBOOK_PATH="no_codebook"
-INIT_CNN_PATH="/mnt/gpudisk/dna_shards/cnn_models_apple_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
-INIT_CNN_PATH="no_cnn"
+WARMUP_STEPS=100
+WARMUP_START_FACTOR=0.01
+WARMUP_END_FACTOR=0.1
 
-VQ_TRAIN_COMMITMENT_WEIGHT=0.250
-VQ_TRAIN_ORTHOGONAL_WEIGHT=0.001
-VQ_TRAIN_DIVERSITY_WEIGHT=0.00001
-VQ_TRAIN_ORTHOGONAL_WEIGHT=0.000
-VQ_TRAIN_DIVERSITY_WEIGHT=0.00000
-
+# 
+WANDB_RUN_NAME="pass13_vqm_cnntype${CNN_TYPE}_epoch${NUM_EPOCHS}_bsz${BATCH_SIZE}_lr2e04_warmup${WARMUP_STEPS}"
 # ----------------------------------------------------------------------------
 # 构建 --do_evaluate 参数
 # 因为这是一个开关（store_true），所以只在需要时添加该 flag
@@ -96,33 +69,29 @@ if [ "$DO_EVALUATE" = "true" ]; then
     EVALUATE_ARG="--do_evaluate"
 fi
 
+
 # ----------------------------------------------------------------------------
 # 构造完整的 Python 命令
 # 使用数组形式避免空格/引号问题，确保命令安全可靠
 # ----------------------------------------------------------------------------
 CMD=(
-    torchrun --nproc_per_node=4  
-    -m poregpt.tokenizers.vqe_tokenizer.vqe_train
-    --train_npy_dir "$TRAIN_NPTY_DIR"
-    --evaluation_npy_dir "$EVAL_NPTY_DIR"
+    torchrun --nproc_per_node=4 --master_port=29501  "scripts/step02_train_cnn_model.py"
+    --npy_dir "$NPTY_DIR"
+    --val_dataset_path "$VAL_DIR"
     --output_model_path "$OUTPUT_MODEL_PATH"
     --batch_size "$BATCH_SIZE"
     --lr "$LR"
     --num_epochs "$NUM_EPOCHS"
-    --codebook_size "$CODEBOOK_SIZE"
     --chunk_size "$CHUNK_SIZE"
     --num_workers "$NUM_WORKERS"
+    --warmup_steps "$WARMUP_STEPS"
+    --warmup_start_factor "$WARMUP_START_FACTOR"
+    --warmup_end_factor "$WARMUP_END_FACTOR"
     --val_ratio "$VAL_RATIO"
-    --save_checkpoint_every_spoch $SAVE_CHECKPOINT_INTERVAL
     --loss_log_interval $LOSS_LOG_INTERVAL
-    --commitment_weight $VQ_TRAIN_COMMITMENT_WEIGHT
-    --codebook_diversity_loss_weight $VQ_TRAIN_DIVERSITY_WEIGHT
-    --orthogonal_reg_weight $VQ_TRAIN_ORTHOGONAL_WEIGHT
     --checkpoint_path $CHECKPOINT_PATH
     --cnn_type $CNN_TYPE
-    --init_codebook_path $INIT_CODEBOOK_PATH
-    --cnn_checkpoint_path $INIT_CNN_PATH
-    --freeze_cnn 0
+    --wandb_name $WANDB_RUN_NAME
     $EVALUATE_ARG 
 )
 
@@ -136,6 +105,7 @@ printf "%q " "${CMD[@]}"
 echo  # 换行
 echo "--------------------------------------------------"
 
+
 # ----------------------------------------------------------------------------
 # 执行训练命令
 # 如果训练失败（非零退出码），脚本将停止（可配合 set -e 更严格）
@@ -146,4 +116,4 @@ echo "--------------------------------------------------"
 # ----------------------------------------------------------------------------
 # 成功提示
 # ----------------------------------------------------------------------------
-echo "VQE tokenizer training completed. Model saved to: $OUTPUT_MODEL_PATH"
+echo "VQ tokenizer training completed. Model saved to: $OUTPUT_MODEL_PATH"
