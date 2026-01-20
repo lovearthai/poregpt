@@ -5,7 +5,7 @@
 # ==============================
 
 FAST5_DIR="/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/fast5"
-OUTPUT_ROOT="fast5_jsonlgz_vqe21"
+OUTPUT_ROOT="fast5_jsonlgz_vqe20_spoch38000"
 MODEL_CKPT="/mnt/nas_syy/default/poregpt/shared/vqe_models_pass20_init_codebook_cnn_and_finetuned/checkpoints/porepgt_vqe_tokenizer.spoch38000.pth"
 NUM_GPUS=4
 MAX_CONCURRENT=32  # 总并发数
