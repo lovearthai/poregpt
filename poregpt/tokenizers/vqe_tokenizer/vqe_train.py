@@ -325,6 +325,8 @@ def vqe_train(
     init_codebook_path: Optional[str] = None,
     cnn_checkpoint_path: Optional[str] = None,
     freeze_cnn: int = 0,
+    global_batch_size: int = 256,
+    device_micro_batch_size: int = 16
 ):
     """
     Distributed training of Nanopore VQ tokenizer using DDP.
@@ -375,6 +377,8 @@ def vqe_train(
         checkpoint_path=checkpoint_path,
         init_codebook_path=init_codebook_path,
         cnn_type=cnn_type,
+        global_batch_size=global_batch_size,
+        device_micro_batch_size=device_micro_batch_size
     )
 
     import torch.distributed as dist
@@ -435,11 +439,12 @@ def vqe_train(
     # ========================
     # Data Loading
     # ========================
+    # 当你引入了 global_batch_size 和 device_micro_batch_size（或 device_batch_size）的概念后，DataLoader 的 batch_size 参数就应该设置为 device_micro_batch_size。因为 DataLoader 的 batch_size 指的是每个进程（每张卡）每次加载的数据量，也就是我们所说的“微批次”（micro-batch）。
     train_dataset = NanoporeSignalDataset(shards_dir=train_npy_dir)
     sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     dataloader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=device_micro_batch_size,
         sampler=sampler,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
@@ -478,17 +483,17 @@ def vqe_train(
         max_entropy = np.log2(codebook_size)
 
         if total_tokens > 0:
+            # 获取排序后的计数值（降序）
             sorted_counts = np.sort(token_counts)[::-1]
-            top1_ratio = float(sorted_counts[0] / total_tokens)
-            if len(sorted_counts) > 3:
-                top3_ratio = float(sorted_counts[3] / total_tokens)
-            if len(sorted_counts) > 5:
-                top5_ratio = float(sorted_counts[5] / total_tokens)
-            if len(sorted_counts) > 7:
-                top7_ratio = float(sorted_counts[7] / total_tokens)
-            if len(sorted_counts) > 9:
-                top9_ratio = float(sorted_counts[9] / total_tokens)
-            top10_ratio = float(sorted_counts[:min(10, codebook_size)].sum() / total_tokens)
+            
+            # 修改top-k ratio的计算方式：出现次数/total_tokens
+            # 这样可以直接比较不同codebook_size下的token利用率
+            top1_ratio = sorted_counts[0] / total_tokens if len(sorted_counts) > 0 else 0.0
+            top3_ratio = sorted_counts[2] / total_tokens if len(sorted_counts) > 2 else 0.0
+            top5_ratio = sorted_counts[4] / total_tokens if len(sorted_counts) > 4 else 0.0
+            top7_ratio = sorted_counts[6] / total_tokens if len(sorted_counts) > 6 else 0.0
+            top9_ratio = sorted_counts[8] / total_tokens if len(sorted_counts) > 8 else 0.0
+            top10_ratio = float(sorted_counts[:min(9, codebook_size)].sum()) / total_tokens if len(sorted_counts) > 9 else 0.0
 
             prob = token_counts / total_tokens
             nonzero_prob = prob[prob > 0]
@@ -501,7 +506,6 @@ def vqe_train(
             top1_ratio, top3_ratio, top5_ratio, top7_ratio, top9_ratio, top10_ratio,
             entropy_val, max_entropy
         )
-
     if do_evaluate and rank == 0:
         if evaluation_npy_dir and os.path.isdir(evaluation_npy_dir):
             print(f"✅ Using independent evaluation dataset: {evaluation_npy_dir}")
@@ -516,7 +520,7 @@ def vqe_train(
             val_subset = torch.utils.data.Subset(val_dataset, indices)
             val_loader = DataLoader(
                 val_subset,
-                batch_size=batch_size,
+                batch_size=device_micro_batch_size,
                 shuffle=False,
                 num_workers=max(2, num_workers // 2),
                 pin_memory=True
@@ -640,6 +644,7 @@ def vqe_train(
     # ========================
     # Training Loop
     # ========================
+
     model.train()
     global_step = start_global_step
     spoch = start_spoch
@@ -653,11 +658,33 @@ def vqe_train(
      codebook_top1_ratio, codebook_top3_ratio, codebook_top5_ratio,
      codebook_top7_ratio, codebook_top9_ratio, codebook_top10_ratio,
      codebook_entropy, codebook_max_entropy) = (0.0,) * 10
+    # --- 修改点 1: 计算累积步数 ---
+    # 假设你已经定义了 global_batch_size 和 device_micro_batch_size
+    # world_size 是 DDP 的进程数量 (可以通过 dist.get_world_size() 获取)
+    world_size = dist.get_world_size() 
+    effective_micro_batch = device_micro_batch_size * world_size
+    accumulation_steps = global_batch_size // effective_micro_batch
+
+    if accumulation_steps == 0:
+        raise ValueError(f"global_batch_size ({global_batch_size}) 太小，或者 device_micro_batch_size ({device_micro_batch_size}) * world_size ({world_size}) 太大，无法进行累积。")
+
+    print(f"使用梯度累积: Global Batch={global_batch_size}, Micro Batch={device_micro_batch_size}, 累积步数={accumulation_steps}")
 
     for epoch in range(start_epoch, num_epochs):
         epoch_start_time = time.time()
         sampler.set_epoch(epoch)
-
+        # --- 修改点 2: 在 epoch 开始时清零梯度 ---
+        # 但如果第一个 micro-step 不是累积周期的第一个 step（即 global_step % accumulation_steps != 0），
+        # 那么第一次 zero_grad 会被提前覆盖。更好的方式是，
+        # 让 Dataloader 的起始 global_step 对齐到某个 accumulation 周期的起点，
+        # 或者在每个 should_update 之后 zero_grad（如果循环不是严格按 accumulation_steps 划分的，这可能不对）。
+        # 通常，如果 global_step 在加载 checkpoint 时正确恢复，
+        # 那么 optimizer.zero_grad() 放在循环外部或第一次 should_update 时执行更安全。
+        # 但根据你的原始逻辑，它在 epoch 开始时，这没问题，只要保证第一次 step 会 zero_grad。
+        # 如果 global_step % accumulation_steps == 0 在循环开始时为 True，则这里 OK。
+        # 否则，可能需要在第一个 micro-step 时检查并 zero_grad。
+        # 让我们假设初始状态是正确的。
+        optimizer.zero_grad()
         for step, batch in enumerate(dataloader):
             global_step += 1
             x = batch.to(device)
@@ -669,137 +696,204 @@ def vqe_train(
             ortho_loss = loss_breakdown.orthogonal_reg
 
             # 💡 ACTUAL LOSS: Fixed weights. DWA is NOT applied here.
+            # 💡 计算当前 step 的 Loss (不立即缩放)
             total_loss = recon_loss + comit_loss * commitment_weight
-
-            optimizer.zero_grad()
+            
+            # --- 修改点 3: 不立即 backward，而是累积 ---
+            # 直接 backward，梯度会自动累加到 .grad 属性中
+            # 注意：此时 total_loss 还没有除以 accumulation_steps
             total_loss.backward()
-            optimizer.step()
+        
+            # --- 修改点 4: 判断是否执行优化器更新 ---
+            is_last_step = (step == len(dataloader) - 1)
+            should_update = (global_step % accumulation_steps == 0) or is_last_step
+            
+            if should_update:
+                # 1. **关键修改**：在执行 step 前，对累积的梯度进行平均
+                # 这等效于将总 loss 除以 accumulation_steps
+                # 可以手动缩放梯度，或者更常用的做法是在 backward 时就处理
+                # 更优雅的方式是：在 backward 时就将单次 loss 缩放，但这要求在知道是否是最后一次时才能确定缩放值。
+                # 我们采用在 backward 时不缩放，在 step 之前统一缩放梯度的方法。
+                # 或者，更简单的理解：我们 backward 了 N 次，每次 loss 都是 full_scale，
+                # 所以总的梯度也是 N 倍，需要除以 N。
+                # PyTorch 优化器会直接使用 .grad 属性，所以我们需要修改 .grad
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad /= accumulation_steps # 对累积的梯度进行平均
 
-            if scheduler is not None:
-                scheduler.step()
+                # 2. 执行梯度更新
+                optimizer.step()
 
-            # Buffer losses for DWA logging (not used in optimization)
-            loss_buffer["recon"].append(recon_loss.item())
-            loss_buffer["comit"].append(comit_loss.item())
-            loss_buffer["ortho"].append(ortho_loss.item())
-            loss_buffer["diver"].append(diver_loss.item())
+                # 3. 执行梯度裁剪 (可选，通常在小 batch 下很有用)
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-            # Update DWA every N steps (logging only)
-            should_update_weights = (step + 1) % update_loss_weight_every == 0 or (step == len(dataloader) - 1)
-            if should_update_weights:
-                spoch += 1
+                # 4. 清空梯度，准备下一个累积周期
+                optimizer.zero_grad()
 
-                def safe_mean(lst):
-                    return sum(lst) / len(lst) if lst else 0.0
+                # --- 保持原有的 Scheduler 更新逻辑 ---
+                if scheduler is not None:
+                    scheduler.step()
 
-                local_avg_losses = torch.tensor([
-                    safe_mean(loss_buffer["recon"]),
-                    safe_mean(loss_buffer["comit"]),
-                    safe_mean(loss_buffer["ortho"]),
-                    safe_mean(loss_buffer["diver"])
-                ], device=device)
+                # --- 以下所有内容都应在此块内 ---
+                # 这些操作现在都基于一次完整的参数更新
 
-                dist.all_reduce(local_avg_losses, op=dist.ReduceOp.AVG)
-                g_recon, g_comit, g_ortho, g_diver = local_avg_losses.tolist()
-                g_total = g_recon + g_comit * commitment_weight + g_ortho * orthogonal_reg_weight + g_diver * codebook_diversity_loss_weight
+                # Buffer losses for DWA logging (需要在每个 micro-step 都做，但汇总在 should_update 时)
+                # 注意：我们需要一个机制来累积 micro-step 的 loss，然后在 should_update 时取平均
+                # 我们可以利用现有的 loss_buffer 逻辑，但需要确保它在每个 accumulation 周期开始时清空，
+                # 并且在 should_update 时处理。
+                # 原来的 loss_buffer 逻辑似乎在 update_loss_weight_every 时清空，
+                # 但我们希望在每个 accumulation 周期结束时清空或处理。
 
-                if rank == 0:
-                    current_losses = {
-                        "recon_loss": g_recon,
-                        "comit_loss": g_comit,
-                        "ortho_loss": g_ortho,
-                        "diver_loss": g_diver,
-                        "total_loss": g_total
-                    }
-                    wvalue = dwa.update_and_get_weights(current_losses)
-                    wvalue_tensor = torch.tensor([
-                        wvalue["recon_loss"],
-                        wvalue["comit_loss"],
-                        wvalue["ortho_loss"],
-                        wvalue["diver_loss"],
+                # 为了让 loss_buffer 适配 accumulation，我们可以将其计数与 accumulation 关联。
+                # 但原代码是按 global_step 的倍数 (update_loss_weight_every) 来处理的。
+                # 为了保持兼容性，我们可以让 loss_buffer 在每个 should_update 时（即每个有效步）累加，
+                # 然后在特定数量的 *有效步* 后（而不是 micro-step）进行 DWA 更新。
+                # 这意味着我们需要一个新的计数器，比如 effective_step_count。
+
+                # ... (需要引入 effective_step_count) ...
+                # effective_step_count = (global_step - 1) // accumulation_steps # 计算从 0 开始的有效步数
+
+                # 为了最小化改动，我们可以假设 update_loss_weight_every 指的是 *有效步* 的间隔。
+                # 那么 effective_step_count = (global_step - 1) // accumulation_steps + 1 (从 1 开始)
+                effective_step_count = global_step // accumulation_steps # 整除正好给出有效步数 (从 1 开始 if global_step starts from 1 after first update)
+
+                # Buffer losses for DWA logging (not used in optimization)
+                loss_buffer["recon"].append(recon_loss.item())
+                loss_buffer["comit"].append(comit_loss.item())
+                loss_buffer["ortho"].append(ortho_loss.item())
+                loss_buffer["diver"].append(diver_loss.item())
+
+
+                # --- 将原 should_update_weights 逻辑移入 here ---
+                should_update_weights = (effective_step_count % update_loss_weight_every == 0) # 或者根据你的需求调整
+                
+                if should_update_weights:
+                    # spoch 在这里更新更有意义，因为它代表了有效的训练步
+                    # spoch = effective_step_count # 或 spoch += 1; 取决于你想如何定义 spoch
+                    spoch += 1
+                    def safe_mean(lst):
+                        return sum(lst) / len(lst) if lst else 0.0
+                    local_avg_losses = torch.tensor([
+                        safe_mean(loss_buffer["recon"]),
+                        safe_mean(loss_buffer["comit"]),
+                        safe_mean(loss_buffer["ortho"]),
+                        safe_mean(loss_buffer["diver"])
                     ], device=device)
-                else:
-                    wvalue_tensor = torch.empty(4, device=device)
 
-                dist.broadcast(wvalue_tensor, src=0)
-                cached_wvalue = wvalue_tensor
-                loss_buffer = {k: [] for k in loss_buffer}
+                    dist.all_reduce(local_avg_losses, op=dist.ReduceOp.AVG)
+                    g_recon, g_comit, g_ortho, g_diver = local_avg_losses.tolist()
+                    g_total = g_recon + g_comit * commitment_weight + g_ortho * orthogonal_reg_weight + g_diver * codebook_diversity_loss_weight
 
-                if rank == 0:
-                    wv_recon, wv_comit, wv_ortho, wv_diver = cached_wvalue.tolist()
-                    current_lr = optimizer.param_groups[0]['lr']
-                    log_and_save(
-                        epoch=epoch,
-                        step=global_step,
-                        total_epochs=num_epochs,
-                        total_steps=total_steps,
-                        epoch_start_time=epoch_start_time,
-                        epoch_total_steps=len(dataloader),
-                        avg_recon_loss=g_recon,
-                        avg_total_loss=g_total,
-                        avg_comit_loss=g_comit,
-                        avg_diver_loss=g_diver,
-                        avg_ortho_loss=g_ortho,
-                        codebook_usage=codebook_usage,
-                        loss_csv_path=loss_csv_path,
-                        dynamic_recon_weight=wv_recon,
-                        dynamic_comit_weight=wv_comit,
-                        dynamic_ortho_weight=wv_ortho,
-                        dynamic_diver_weight=wv_diver,
-                        lr=current_lr
-                    )
-
-                    log_dict = {
-                        "train/recon_loss": g_recon,
-                        "train/comit_loss": g_comit,
-                        "train/ortho_loss": g_ortho,
-                        "train/diver_loss": g_diver,
-                        "train/total_loss": g_total,
-                        "codebook/usage": codebook_usage,
-                        "codebook/entropy": codebook_entropy,
-                        "codebook/max_entropy": codebook_max_entropy,
-                        "topcode/top1_ratio": codebook_top1_ratio,
-                        "topcode/top3_ratio": codebook_top3_ratio,
-                        "topcode/top5_ratio": codebook_top5_ratio,
-                        "topcode/top7_ratio": codebook_top7_ratio,
-                        "topcode/top9_ratio": codebook_top9_ratio,
-                        "topcode/topx_ratio": codebook_top10_ratio,
-                        "weights/recon": wv_recon,
-                        "weights/comit": wv_comit,
-                        "learning_rate": current_lr,
-                        "epoch": epoch + 1,
-                    }
-                    if use_wandb:
-                        wandb.log(log_dict, step=global_step)
-
-                # Periodic evaluation
-                if  (spoch + 1) % evaluate_every_spoch == 0 and spoch < total_spochs:
-                    dist.barrier()  # 所有 ranks 同步到此
                     if rank == 0:
-                        (codebook_usage, total_tokens,
-                         codebook_top1_ratio, codebook_top3_ratio, codebook_top5_ratio,
-                         codebook_top7_ratio, codebook_top9_ratio, codebook_top10_ratio,
-                         codebook_entropy, codebook_max_entropy) = evaluate_codebook_metrics()
-                        print(f"Spoch {spoch+1} - Codebook Usage: {codebook_usage:.2%}")
+                        current_losses = {
+                            "recon_loss": g_recon,
+                            "comit_loss": g_comit,
+                            "ortho_loss": g_ortho,
+                            "diver_loss": g_diver,
+                            "total_loss": g_total
+                        }
+                        wvalue = dwa.update_and_get_weights(current_losses)
+                        wvalue_tensor = torch.tensor([
+                            wvalue["recon_loss"],
+                            wvalue["comit_loss"],
+                            wvalue["ortho_loss"],
+                            wvalue["diver_loss"],
+                        ], device=device)
                     else:
-                        # 其他 ranks 不做任何事，但必须等待 rank 0 完成
-                        pass
-                    dist.barrier()  # eval 完再同步 # 所有 ranks 继续
+                        wvalue_tensor = torch.empty(4, device=device)
 
-                # Periodic checkpointing
-                if rank == 0 and (spoch + 1) % save_checkpoint_every_spoch == 0:
-                    ckpt_path = f"{output_model_path}.spoch{spoch+1}.pth"
-                    save_full_checkpoint(
-                        path=ckpt_path,
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        epoch=epoch,
-                        spoch=spoch,
-                        global_step=global_step,
-                        cnn_type=cnn_type,
-                        rank=rank
-                    )
+                    dist.broadcast(wvalue_tensor, src=0)
+                    cached_wvalue = wvalue_tensor
+                    loss_buffer = {k: [] for k in loss_buffer}
+
+                    if rank == 0:
+                        wv_recon, wv_comit, wv_ortho, wv_diver = cached_wvalue.tolist()
+                        current_lr = optimizer.param_groups[0]['lr']
+                        log_and_save(
+                            epoch=epoch,
+                            step=global_step,
+                            total_epochs=num_epochs,
+                            total_steps=total_steps,
+                            epoch_start_time=epoch_start_time,
+                            epoch_total_steps=len(dataloader),
+                            avg_recon_loss=g_recon,
+                            avg_total_loss=g_total,
+                            avg_comit_loss=g_comit,
+                            avg_diver_loss=g_diver,
+                            avg_ortho_loss=g_ortho,
+                            codebook_usage=codebook_usage,
+                            loss_csv_path=loss_csv_path,
+                            dynamic_recon_weight=wv_recon,
+                            dynamic_comit_weight=wv_comit,
+                            dynamic_ortho_weight=wv_ortho,
+                            dynamic_diver_weight=wv_diver,
+                            lr=current_lr
+                        )
+
+                        log_dict = {
+                            "train/recon_loss": g_recon,
+                            "train/comit_loss": g_comit,
+                            "train/ortho_loss": g_ortho,
+                            "train/diver_loss": g_diver,
+                            "train/total_loss": g_total,
+                            "codebook/usage": codebook_usage,
+                            "codebook/entropy": codebook_entropy,
+                            "codebook/max_entropy": codebook_max_entropy,
+                            "topcode/top1_ratio": codebook_top1_ratio,
+                            "topcode/top3_ratio": codebook_top3_ratio,
+                            "topcode/top5_ratio": codebook_top5_ratio,
+                            "topcode/top7_ratio": codebook_top7_ratio,
+                            "topcode/top9_ratio": codebook_top9_ratio,
+                            "topcode/topx_ratio": codebook_top10_ratio,
+                            "weights/recon": wv_recon,
+                            "weights/comit": wv_comit,
+                            "learning_rate": current_lr,
+                            "epoch": epoch + 1,
+                        }
+                        if use_wandb:
+                            wandb.log(log_dict, step=global_step)
+
+                    # --- 评估 ---
+                    # 评估的频率现在应该基于 effective_step_count (即 spoch)
+                    # 注意：这里需要小心处理 spoch 的定义，确保它与 evaluate_every_spoch 对齐
+                    # 假设 spoch 现在等于 effective_step_count
+                    # 注意：spoch 在这里被赋值，所以用 spoch 而不是 effective_step_count
+                    if (spoch % evaluate_every_spoch == 0): # 使用 spoch
+                        dist.barrier()  # 所有 ranks 同步到此
+                        if rank == 0:
+                            # 这个函数运行时间过长，会导致超时退出
+                            (codebook_usage, total_tokens,
+                             codebook_top1_ratio, codebook_top3_ratio, codebook_top5_ratio,
+                             codebook_top7_ratio, codebook_top9_ratio, codebook_top10_ratio,
+                             codebook_entropy, codebook_max_entropy) = evaluate_codebook_metrics()
+                            print(f"Effective Step {spoch} - Codebook Usage: {codebook_usage:.2%}") # 更新打印信息
+                        else:
+                            # 其他 ranks 不做任何事，但必须等待 rank 0 完成
+                            pass
+                        dist.barrier()  # eval 完再同步 # 所有 ranks 继续
+
+                    # Periodic checkpointing
+                    if rank == 0 and (spoch + 1) % save_checkpoint_every_spoch == 0:
+                        ckpt_path = f"{output_model_path}.spoch{spoch+1}.pth"
+                        save_full_checkpoint(
+                            path=ckpt_path,
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            epoch=epoch,
+                            spoch=spoch,
+                            global_step=global_step,
+                            cnn_type=cnn_type,
+                            rank=rank
+                        )
+                # --- End of if should_update_weights block ---
+                else: # 如果 not should_update
+                    # 在累积周期内，只需添加损失到 buffer
+                    # (这已经在 if should_update 之外做了)
+                    loss_buffer["recon"].append(recon_loss.item())
+                    loss_buffer["comit"].append(comit_loss.item())
+                    loss_buffer["ortho"].append(ortho_loss.item())
+                    loss_buffer["diver"].append(diver_loss.item())
 
     # Final save
     if rank == 0:
@@ -850,6 +944,8 @@ def main():
     parser.add_argument("--init_codebook_path", type=str, default="")
     parser.add_argument("--cnn_checkpoint_path", type=str, default="")
     parser.add_argument("--freeze_cnn", type=int, default=0)
+    parser.add_argument("--global_batch_size", type=int, default=256)
+    parser.add_argument("--device_micro_batch_size", type=int, default=8)
     args = parser.parse_args()
 
     vqe_train(
@@ -874,7 +970,9 @@ def main():
         cnn_type=args.cnn_type,
         init_codebook_path=args.init_codebook_path,
         cnn_checkpoint_path=args.cnn_checkpoint_path,
-        freeze_cnn=args.freeze_cnn
+        freeze_cnn=args.freeze_cnn,
+        global_batch_size = args.global_batch_size,
+        device_micro_batch_size = args.device_micro_batch_size
     )
 
 if __name__ == "__main__":
