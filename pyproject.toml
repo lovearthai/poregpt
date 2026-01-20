@@ -31,3 +31,5 @@ namespaces = false   # 如果你未来用命名空间包，可设为 true
 
 [project.scripts]
 poregpt-vqe-tokenize-fast5 = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_fast5:main"
+poregpt-vqe-tokenize-fast5-batched = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_fast5_batched:main"
+poregpt-vqe-fast5-to-chank = "poregpt.tokenizers.vqe_tokenizer.fast5_to_chank:main"

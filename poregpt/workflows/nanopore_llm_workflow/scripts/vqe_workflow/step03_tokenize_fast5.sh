@@ -30,7 +30,7 @@ echo "➡️  Tokenizing: $FAST5_FILE"
 echo "📤 Output:      $output_file"
 echo "🖥️  GPU:         $GPU_ID"
 
-poregpt-vqe-tokenize-fast5\
+poregpt-vqe-tokenize-fast5-batched\
     --fast5_file "$FAST5_FILE" \
     --output_file "$output_file" \
     --model_ckpt "$MODEL_CKPT" \
