@@ -36,6 +36,9 @@ CHECKPOINT_PATH="models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
 # 当CODEBOOK_SIZE==65536时
 BATCH_SIZE=8
 
+GLOBAL_BATCH_SIZE=256
+DEVICE_MICRO_BATCH_SIZE=8
+
 # 学习率（Adam 优化器）
 # scratch
 LR=0.0002  # 即 3e-4
@@ -64,10 +67,10 @@ CHUNK_SIZE=12000
 NUM_WORKERS=16
 
 # 验证集大小（从数据中随机抽取多少样本用于评估）
-VAL_RATIO=0.1
+VAL_RATIO=0.01
 
 # 验证集大小（从数据中随机抽取多少样本用于评估）
-SAVE_CHECKPOINT_INTERVAL=500
+SAVE_CHECKPOINT_INTERVAL=1000
 
 LOSS_LOG_INTERVAL=10
 
@@ -86,6 +89,7 @@ VQ_TRAIN_ORTHOGONAL_WEIGHT=0.001
 VQ_TRAIN_DIVERSITY_WEIGHT=0.00001
 VQ_TRAIN_ORTHOGONAL_WEIGHT=0.000
 VQ_TRAIN_DIVERSITY_WEIGHT=0.00000
+
 
 # ----------------------------------------------------------------------------
 # 构建 --do_evaluate 参数
@@ -123,6 +127,8 @@ CMD=(
     --init_codebook_path $INIT_CODEBOOK_PATH
     --cnn_checkpoint_path $INIT_CNN_PATH
     --freeze_cnn 0
+    --global_batch_size $GLOBAL_BATCH_SIZE 
+    --device_micro_batch_size $DEVICE_MICRO_BATCH_SIZE
     $EVALUATE_ARG 
 )
 
