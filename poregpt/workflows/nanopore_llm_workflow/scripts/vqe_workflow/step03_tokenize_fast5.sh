@@ -7,10 +7,9 @@
 set -e  # 出错立即退出
 which vq-tokenize
 # --- 配置 ---
-MODEL_CKPT="/mnt/nas_syy/default/huada_signal_llm/train_vqe_models/pass18_cnntype1_datav2/models/nanopore_signal_tokenizer.pth.spoch10000.pth"
+MODEL_CKPT="/mnt/gpudisk/dna_shards/vqe_models_pass18_only_init_codebook/nanopore_signal_tokenizer.pth.spoch16000.pth"
+
 GPU_ID=0
-MEDF=5
-LPF=0
 OUTPUT_ROOT="fast5_jsonlgz"
 
 
@@ -36,7 +35,6 @@ poregpt-vqe-tokenize-fast5\
     --output_file "$output_file" \
     --model_ckpt "$MODEL_CKPT" \
     --gpu_id "$GPU_ID" \
-    --medf "$MEDF" \
-    --lpf "$LPF"
-
+    --signal_process_strategy "apple" \
+    --token_batch_size 8000
 echo "✅ Done."
