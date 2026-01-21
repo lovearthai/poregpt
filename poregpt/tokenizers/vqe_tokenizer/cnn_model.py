@@ -97,11 +97,11 @@ class Conv1dWithMeanChannel(nn.Module):
 class NanoporeCNNModel(nn.Module):
     """Nanopore 信号重建用纯卷积自编码器（无 VQ）。"""
 
-    def __init__(self, cnn_type: Literal[0, 1, 2] = 1) -> None:
+    def __init__(self, cnn_type: Literal[0, 1, 2,3] = 1) -> None:
         super().__init__()
 
-        if cnn_type not in (0, 1, 2):
-            raise ValueError(f"`cnn_type` must be 0, 1 or 2, got {cnn_type}.")
+        if cnn_type not in (0, 1, 2,3):
+            raise ValueError(f"`cnn_type` must be 0, 1 or 2,3 got {cnn_type}.")
 
         self.cnn_type: int = cnn_type
 
