@@ -27,6 +27,41 @@ class InterfaceTokenizer(ABC):
         """从 FAST5 文件中读取信号并保存 token 到输出路径"""
         pass
 
+# 全局 FAISS 索引（每个子进程初始化一次）
+_GLOBAL_INDEX = None
+
+def init_worker(centroids_path: str, use_gpu: bool = True, gpu_id: int = 0):
+    global _GLOBAL_INDEX
+    if _GLOBAL_INDEX is not None:
+        return
+    data = np.load(centroids_path)
+    centroids = data['centroids'].astype(np.float32)
+    d = centroids.shape[1]
+
+    if use_gpu and hasattr(faiss, 'StandardGpuResources'):
+        # === GPU 模式 ===
+        print("🚀 Initializing FAISS GPU index...")
+        res = faiss.StandardGpuResources()  # GPU 资源管理器
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(centroids) # type: ignore
+        # 将 CPU 索引搬到 GPU（默认 device=0）
+        _GLOBAL_INDEX = faiss.index_cpu_to_gpu(res, gpu_id, cpu_index)
+        # print(f"✅ FAISS GPU index ready on device {gpu_id}, {centroids.shape[0]} centroids")
+    else:
+        # === CPU 回退模式 ===
+        print("💻 Using FAISS CPU index...")
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(centroids) # type: ignore
+        _GLOBAL_INDEX = cpu_index
+        
+def tokenize_signal_with_global_index(signal: np.ndarray) -> list: 
+    _, I = _GLOBAL_INDEX.search(signal, 1) # type: ignore
+    cluster_ids = I[:, 0].tolist()
+
+    parts = []
+    for token_id in cluster_ids:
+        parts.append(f"<|bwav:{int(token_id) + 128}|>") # token_id 偏移 128，避免与特殊符号冲突
+    return parts
 class KmeansTokenizer(InterfaceTokenizer):
     """
     Nanopore RVQ Tokenizer 封装类。
@@ -43,29 +78,10 @@ class KmeansTokenizer(InterfaceTokenizer):
         """
         初始化 tokenizer。
         """
-        data = np.load(centroids_path, allow_pickle=True).item()
-        self.window_size = data["dimension"]
+        data = np.load(centroids_path)
+        self.window_size = data["dim"]
         self.stride = data["stride"]
-        self.index = self._init_worker(data["centroids"])
-
-    def _init_worker(self, centroids):
-        d = centroids.shape[1]
-        if hasattr(faiss, 'StandardGpuResources'):
-        # === GPU 模式 ===
-            print("🚀 Initializing FAISS GPU index...")
-            res = faiss.StandardGpuResources()  # GPU 资源管理器
-            cpu_index = faiss.IndexFlatL2(d)
-            cpu_index.add(centroids) # type: ignore
-            # 将 CPU 索引搬到 GPU（默认 device=0）
-            index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
-        else:
-            # === CPU 回退模式 ===
-            print("💻 Using FAISS CPU index...")
-            cpu_index = faiss.IndexFlatL2(d)
-            cpu_index.add(centroids) # type: ignore
-            index = cpu_index
-        return index
-    
+        init_worker(centroids_path)
 
     def tokenize_data(self, signal: np.ndarray) -> list:
         if signal.size == 0:
@@ -77,13 +93,7 @@ class KmeansTokenizer(InterfaceTokenizer):
             X = np.stack(vec_list, axis=0).astype(np.float32)
         except Exception:
             return []
-        _, I = self.index.search(X, 1) # type: ignore
-        cluster_ids = I[:, 0].tolist()
-
-        parts = []
-        for token_id in cluster_ids:
-            parts.append(f"<|bwav:{int(token_id)}|>")
-        return parts
+        return tokenize_signal_with_global_index(X)
 
 
     def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
