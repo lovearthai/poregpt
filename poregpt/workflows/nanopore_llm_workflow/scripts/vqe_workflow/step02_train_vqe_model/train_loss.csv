@@ -1,0 +1,1 @@
+epoch,step,recon_loss,total_loss,comit_loss,diver_loss,ortho_loss,codebook_usage,wv_recon,wv_comit,wv_ortho,wv_diver,lr

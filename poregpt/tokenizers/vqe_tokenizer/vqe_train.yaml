@@ -1,0 +1,92 @@
+# VQ-VAE 模型训练配置文件
+# 用于 nanopore 测序信号 tokenization 的模型训练
+
+# --- 数据路径 ---
+# 训练数据集目录 (包含 .npy 文件)
+train_npy_dir: "/path/to/your/train/data"
+# 验证数据集目录 (可选，如果 do_evaluate 为 True 则需要)
+evaluation_npy_dir: "/path/to/your/validation/data"
+
+# --- 输出与检查点 ---
+# 训练完成后保存的模型文件路径
+output_model_path: "nanopore_vq_tokenizer.pth"
+# 训练损失记录到 CSV 文件的路径
+loss_csv_path: "train_loss.csv"
+# 从指定路径加载检查点以恢复训练 (可选，留空或设为 null 以从头开始)
+checkpoint_path: ""
+# 训练多少个 epoch 后保存一次模型检查点
+save_checkpoint_every_spoch: 100
+# 每隔多少个 step 打印一次训练日志
+loss_log_interval: 10
+
+# --- 训练超参数 ---
+# 总共训练的 epoch 数
+num_epochs: 100
+# 学习率
+lr: 0.0003
+# 全局批次大小 (Global Batch Size)，用于模拟更大的有效批次大小
+global_batch_size: 256
+# 每个设备上的微批次大小 (Micro Batch Size)，影响内存使用和梯度累积
+device_micro_batch_size: 8
+# 梯度累积步数计算方式: global_batch_size / (batch_size * world_size)
+# 这里假设 world_size=1 (单卡) 或根据实际 GPU 数调整
+
+# --- 模型架构与量化 ---
+# VQ-VAE 中的码本 (Codebook) 大小，决定了 token 的数量
+codebook_size: 8192
+# 输入信号序列的长度 (每个样本的信号点数)
+chunk_size: 12000
+# 编码器 CNN 的类型 (0, 1, 2 对应不同结构)
+cnn_type: 0
+# 初始化码本的路径 (可选，用于预初始化码本)
+init_codebook_path: ""
+# CNN 编码器的预训练模型路径 (可选，用于初始化编码器)
+cnn_checkpoint_path: ""
+# 是否冻结 CNN 编码器权重 (0: 否, 1: 是)
+freeze_cnn: 0
+
+# --- 损失函数权重 ---
+# VQ-VAE 中承诺损失 (Commitment Loss) 的权重
+commitment_weight: 1.0
+# 码本多样性损失 (Codebook Diversity Loss) 的权重
+codebook_diversity_loss_weight: 1.0
+# 正交正则化损失 (Orthogonal Regularization Loss) 的权重
+orthogonal_reg_weight: 1.0
+# 更新损失权重的频率 (每 N 个 step 更新一次)
+update_loss_weight_every: 10
+
+# --- 数据加载 ---
+# 每个进程加载数据的批次大小 (内部使用，受 gradient accumulation 影响)
+batch_size: 16 
+# 加载数据时使用的子进程数量
+num_workers: 8
+# 预取因子，加速数据加载
+prefetch_factor: 128
+# 验证集比例 (从训练集中划分)
+val_ratio: 0.1
+
+# --- 评估 ---
+# 是否在训练过程中进行验证评估
+do_evaluate: false
+# 每隔多少个 epoch 进行一次评估
+evaluate_every_spoch: 100
+
+# --- 学习率调度 ---
+# 学习率调度器类型 ("cosine", "linear", "constant_with_warmup" 等)
+lr_scheduler_type: "cosine"
+# 预热 (Warmup) 的步数
+warmup_steps: 500
+# 预热开始时的学习率倍数
+warmup_start_factor: 0.000001
+# 预热结束时的学习率倍数 (通常为 1.0)
+warmup_end_factor: 1.0
+# 主学习率调度器结束时的学习率倍数
+main_scheduler_end_factor: 0.000001
+
+# --- WandB 实验跟踪 (Weights & Biases) ---
+# 是否启用 WandB 日志记录
+use_wandb: true
+# WandB 项目名称
+wandb_project: "nanopore_vq"
+# 当前运行的实验名称
+wandb_name: "experiment_001"

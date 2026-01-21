@@ -1,0 +1,78 @@
+# VQ-VAE 模型训练配置文件
+# 用于 nanopore 测序信号 tokenization 的模型训练
+
+# --- 数据路径 ---
+# 训练数据集目录 (包含 .npy 文件)
+train_npy_dir: "/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/train"
+# 验证数据集目录 (可选，如果 do_evaluate 为 True 则需要)
+evaluation_npy_dir: "/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/validation"
+
+# --- 输出与检查点 ---
+# 训练完成后保存的模型文件路径
+output_model_path: "models/porepgt_vqe_tokenizer"
+# 训练损失记录到 CSV 文件的路径
+loss_csv_path: "train_loss.csv"
+# 从指定路径加载检查点以恢复训练 (可选，留空或设为 null 以从头开始)
+# 示例: "models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
+checkpoint_path: ""
+
+# 训练多少个 epoch 后保存一次模型检查点
+save_checkpoint_every_spoch: 500
+# 每隔多少个 step 打印一次训练日志
+loss_log_interval: 10
+
+# --- 训练超参数 ---
+# 总共训练的 epoch 数
+num_epochs: 50
+# 学习率
+lr: 5.0e-05
+# 全局批次大小 (Global Batch Size)，用于模拟更大的有效批次大小
+global_batch_size: 256
+# 每个设备上的微批次大小 (Micro Batch Size)，影响内存使用和梯度累积
+device_micro_batch_size: 8
+
+# --- 模型架构与量化 ---
+# VQ-VAE 中的码本 (Codebook) 大小，决定了 token 的数量
+codebook_size: 65536
+# VQ 码本嵌入维度 (新增参数，原脚本中的 CODEBOOK_DIM)
+codebook_dim: 64
+# 输入信号序列的长度 (每个样本的信号点数)
+chunk_size: 12000
+# 编码器 CNN 的类型 (0, 1, 2 对应不同结构)
+cnn_type: 1
+# 初始化码本的路径 (可选，用于预初始化码本)
+# 示例: "/mnt/nas_syy/default/poregpt/shared/kmc_models_apple_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy"
+init_codebook_path: "/mnt/nas_syy/default/poregpt/shared/kmc_models_apple_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy"
+# CNN 编码器的预训练模型路径 (可选，用于初始化编码器)
+# 示例: "/mnt/nas_syy/default/poregpt/shared/cnn_models_apple_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
+cnn_checkpoint_path: "/mnt/nas_syy/default/poregpt/shared/cnn_models_apple_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
+# 是否冻结 CNN 编码器权重 (0: 否, 1: 是)
+freeze_cnn: 0
+
+# --- 损失函数权重 ---
+# VQ-VAE 中承诺损失 (Commitment Loss) 的权重
+commitment_weight: 0.25
+# 码本多样性损失 (Codebook Diversity Loss) 的权重
+codebook_diversity_loss_weight: 0.00001
+# 正交正则化损失 (Orthogonal Regularization Loss) 的权重
+orthogonal_reg_weight: 0.0
+
+# --- 数据加载 ---
+# 每个进程加载数据的批次大小 (内部使用，受 gradient accumulation 影响)
+batch_size: 8
+# 加载数据时使用的子进程数量
+num_workers: 16
+# 验证集比例 (从训练集中划分)
+val_ratio: 0.01
+
+# --- 评估 ---
+# 是否在训练过程中进行验证评估
+do_evaluate: true
+
+# --- WandB 实验跟踪 (Weights & Biases) ---
+# 是否启用 WandB 日志记录
+use_wandb: true
+# WandB 项目名称
+wandb_project: "nanopore_vq"
+# 当前运行的实验名称
+wandb_name: "experiment_001"
