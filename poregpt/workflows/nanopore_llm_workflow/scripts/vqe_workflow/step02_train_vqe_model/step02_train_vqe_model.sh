@@ -41,13 +41,13 @@ DEVICE_MICRO_BATCH_SIZE=8
 
 # 学习率（Adam 优化器）
 # scratch
-LR=0.0002  # 即 3e-4
+#LR=0.0002  # 即 2e-4
 
 # init all
-#LR=0.00005  # 即 3e-4
+LR=0.00005  # 即 5e-5
 
 # init book
-#LR=0.0002  # 即 3e-4
+#LR=0.0002  # 即 2e-4
 
 
 # 训练轮数（epochs）
@@ -70,7 +70,7 @@ NUM_WORKERS=16
 VAL_RATIO=0.01
 
 # 验证集大小（从数据中随机抽取多少样本用于评估）
-SAVE_CHECKPOINT_INTERVAL=1000
+SAVE_CHECKPOINT_INTERVAL=500
 
 LOSS_LOG_INTERVAL=10
 
@@ -79,10 +79,10 @@ DO_EVALUATE="true"  # 设为 "true" 启用 --do_evaluate，"false" 则不启用
 
 CNN_TYPE=1
 
-INIT_CODEBOOK_PATH="/mnt/gpudisk/dna_shards/kmc_models_apple_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy"
-INIT_CODEBOOK_PATH="no_codebook"
-INIT_CNN_PATH="/mnt/gpudisk/dna_shards/cnn_models_apple_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
-INIT_CNN_PATH="no_cnn"
+INIT_CODEBOOK_PATH="/mnt/nas_syy/default/poregpt/shared/kmc_models_apple_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy"
+#INIT_CODEBOOK_PATH="no_codebook"
+INIT_CNN_PATH="/mnt/nas_syy/default/poregpt/shared/cnn_models_apple_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
+#INIT_CNN_PATH="no_cnn"
 
 VQ_TRAIN_COMMITMENT_WEIGHT=0.250
 VQ_TRAIN_ORTHOGONAL_WEIGHT=0.001
