@@ -1,0 +1,88 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            43zm7yk3151oxjiwmrx5fgey54shj82n:
+                args:
+                    - --config
+                    - config_pass21_c64k.yaml
+                cpu_count: 21
+                cpu_count_logical: 42
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "528046399488"
+                        used: "465658707968"
+                email: jiaoshuaihit@gmail.com
+                executable: /mnt/modeldisk/conda_home/anaconda3/envs/bonito_py310/bin/python3.10
+                git:
+                    commit: dcc734b00a855e4bcffa9432c0d051f5771d0d79
+                    remote: git@github-lovearthai:lovearthai/poregpt.git
+                gpu: NVIDIA A40
+                gpu_count: 4
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "48305799168"
+                      name: NVIDIA A40
+                      uuid: GPU-d056d7b4-dbe7-de0c-339a-66f4bc839817
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "48305799168"
+                      name: NVIDIA A40
+                      uuid: GPU-1aee06c6-1359-19fe-88d4-2707c9310c91
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "48305799168"
+                      name: NVIDIA A40
+                      uuid: GPU-99d5c909-c831-16fc-ace4-a411f8e19837
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "48305799168"
+                      name: NVIDIA A40
+                      uuid: GPU-af603832-5e4a-d6e1-c7c6-ed4ab96be23f
+                host: iZ1pp01kqmxkqkfwzt31c7Z
+                memory:
+                    total: "506484314112"
+                os: Linux-5.15.0-52-generic-x86_64-with-glibc2.35
+                program: -m poregpt.tokenizers.vqe_tokenizer.vqe_train
+                python: CPython 3.10.19
+                root: /mnt/nas_syy/default/poregpt/poregpt/poregpt/workflows/nanopore_llm_workflow/scripts/vqe_workflow/step02_train_vqe_model
+                startedAt: "2026-01-21T05:19:28.066979Z"
+                writerId: 43zm7yk3151oxjiwmrx5fgey54shj82n
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+                - 105
+            "2":
+                - 1
+                - 105
+            "3":
+                - 13
+                - 16
+            "4": 3.10.19
+            "5": 0.21.0
+            "12": 0.21.0
+            "13": linux-x86_64
+batch_size:
+    value: 8
+chunk_size:
+    value: 12000
+codebook_diversity_loss_weight:
+    value: 1e-05
+codebook_size:
+    value: 65536
+commitment_weight:
+    value: 0.25
+lr:
+    value: 5e-05
+num_epochs:
+    value: 50
+orthogonal_reg_weight:
+    value: 0
+update_loss_weight_every:
+    value: 10
+world_size:
+    value: 4

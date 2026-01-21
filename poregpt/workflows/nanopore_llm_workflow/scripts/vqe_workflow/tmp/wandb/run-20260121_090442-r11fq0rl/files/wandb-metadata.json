@@ -1,0 +1,106 @@
+{
+  "os":  "Linux-5.15.0-52-generic-x86_64-with-glibc2.35",
+  "python":  "CPython 3.10.19",
+  "startedAt":  "2026-01-21T01:04:42.114418Z",
+  "args":  [
+    "--train_npy_dir",
+    "/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/train",
+    "--evaluation_npy_dir",
+    "/mnt/nas_syy/default/huada_signal_llm/dataset/dna/human_min0_max2_read96655/memap/validation",
+    "--output_model_path",
+    "models/porepgt_vqe_tokenizer",
+    "--batch_size",
+    "8",
+    "--lr",
+    "0.00005",
+    "--num_epochs",
+    "50",
+    "--codebook_size",
+    "65536",
+    "--chunk_size",
+    "12000",
+    "--num_workers",
+    "16",
+    "--val_ratio",
+    "0.01",
+    "--save_checkpoint_every_spoch",
+    "500",
+    "--loss_log_interval",
+    "10",
+    "--commitment_weight",
+    "0.250",
+    "--codebook_diversity_loss_weight",
+    "0.00000",
+    "--orthogonal_reg_weight",
+    "0.000",
+    "--checkpoint_path",
+    "models_old/nanopore_signal_tokenizer.pth.spoch26000.pth",
+    "--cnn_type",
+    "1",
+    "--init_codebook_path",
+    "/mnt/nas_syy/default/poregpt/shared/kmc_models_apple_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy",
+    "--cnn_checkpoint_path",
+    "/mnt/nas_syy/default/poregpt/shared/cnn_models_apple_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth",
+    "--freeze_cnn",
+    "0",
+    "--global_batch_size",
+    "256",
+    "--device_micro_batch_size",
+    "8",
+    "--do_evaluate"
+  ],
+  "program":  "-m poregpt.tokenizers.vqe_tokenizer.vqe_train",
+  "git":  {
+    "remote":  "git@github-lovearthai:lovearthai/poregpt.git",
+    "commit":  "1a3c80c15c1c80e50356158a8ff203c937b0be34"
+  },
+  "email":  "jiaoshuaihit@gmail.com",
+  "root":  "/mnt/nas_syy/default/poregpt/poregpt/poregpt/workflows/nanopore_llm_workflow/scripts/vqe_workflow/tmp",
+  "host":  "iZ1pp01kqmxkqkfwzt31c7Z",
+  "executable":  "/mnt/modeldisk/conda_home/anaconda3/envs/bonito_py310/bin/python3.10",
+  "cpu_count":  21,
+  "cpu_count_logical":  42,
+  "gpu":  "NVIDIA A40",
+  "gpu_count":  4,
+  "disk":  {
+    "/":  {
+      "total":  "528046399488",
+      "used":  "465663270912"
+    }
+  },
+  "memory":  {
+    "total":  "506484314112"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA A40",
+      "memoryTotal":  "48305799168",
+      "cudaCores":  10752,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-d056d7b4-dbe7-de0c-339a-66f4bc839817"
+    },
+    {
+      "name":  "NVIDIA A40",
+      "memoryTotal":  "48305799168",
+      "cudaCores":  10752,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-1aee06c6-1359-19fe-88d4-2707c9310c91"
+    },
+    {
+      "name":  "NVIDIA A40",
+      "memoryTotal":  "48305799168",
+      "cudaCores":  10752,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-99d5c909-c831-16fc-ace4-a411f8e19837"
+    },
+    {
+      "name":  "NVIDIA A40",
+      "memoryTotal":  "48305799168",
+      "cudaCores":  10752,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-af603832-5e4a-d6e1-c7c6-ed4ab96be23f"
+    }
+  ],
+  "cudaVersion":  "12.4",
+  "writerId":  "gbhxjnm05umzvlicp6iwq3n03lpfs2xw"
+}
