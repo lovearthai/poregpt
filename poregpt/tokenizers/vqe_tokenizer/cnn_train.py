@@ -7,6 +7,9 @@ import numpy as np
 import csv
 import time
 from typing import Optional
+import yaml
+import argparse
+
 
 # 相对导入模块
 from .dataset import NanoporeSignalDataset
@@ -486,3 +489,80 @@ def cnn_train(
     # 清理分布式环境
     dist.barrier()
     dist.destroy_process_group()
+def main():
+    # 定义一个简单的解析器，只用于获取 config 文件路径
+    parser = argparse.ArgumentParser(description="Train Nanopore Signal CNN using a YAML config file.")
+    parser.add_argument("--config", type=str, required=True, help="Path to the YAML config file.")
+    args, _ = parser.parse_known_args() # 解析已知参数（主要是 --config），忽略其他可能传入的参数
+
+    # 读取 YAML 配置文件
+    config_file_path = args.config # 使用命令行传入的路径
+    with open(config_file_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+
+    # 从配置字典中提取参数，并使用 get 设置默认值
+    # 从 data 部分提取
+    npy_dir = config.get('data', {}).get('npy_dir', '')
+    val_dataset_path = config.get('data', {}).get('val_dataset_path', None)
+
+    # 从 training 部分提取
+    output_model_path = config.get('training', {}).get('output_model_path', "demo_nanopore_vq_tokenizer.pth")
+    batch_size = config.get('training', {}).get('batch_size', 16)
+    lr = config.get('training', {}).get('lr', 3e-4)
+    num_epochs = config.get('training', {}).get('num_epochs', 10)
+    chunk_size = config.get('training', {}).get('chunk_size', 12000)
+    num_workers = config.get('training', {}).get('num_workers', 8)
+    val_ratio = config.get('training', {}).get('val_ratio', 0.1)
+    loss_csv_path = config.get('training', {}).get('loss_csv_path', "train_loss.csv")
+    loss_log_interval = config.get('training', {}).get('loss_log_interval', 10)
+    checkpoint_path = config.get('training', {}).get('checkpoint_path', "checkpoint_nanopore_vq_tokenizer.pth")
+    cnn_type = config.get('training', {}).get('cnn_type', 0)
+    prefetch_factor = config.get('training', {}).get('prefetch_factor', 128)
+
+    # 从 logging 部分提取
+    do_evaluate = config.get('logging', {}).get('do_evaluate', False) # 默认为 False，与 argparse 的 store_true 行为不同
+    use_wandb = config.get('logging', {}).get('use_wandb', True)
+    wandb_project = config.get('logging', {}).get('wandb_project', 'nanopore_cnn')
+    wandb_name = config.get('logging', {}).get('wandb_name', 'default_cnn_run')
+
+    # 从 scheduler 部分提取
+    lr_scheduler_type = config.get('scheduler', {}).get('lr_scheduler_type', 'cosine')
+    warmup_steps = config.get('scheduler', {}).get('warmup_steps', 1000)
+    warmup_start_factor = config.get('scheduler', {}).get('warmup_start_factor', 1e-6)
+    warmup_end_factor = config.get('scheduler', {}).get('warmup_end_factor', 1.0)
+    main_scheduler_end_factor = config.get('scheduler', {}).get('main_scheduler_end_factor', 1e-5)
+
+    # 从 checkpointing 部分提取
+    save_checkpoint_every_epoch = config.get('checkpointing', {}).get('save_checkpoint_every_epoch', 1)
+
+    # 调用 cnn_train 函数
+    cnn_train(
+        npy_dir=npy_dir,
+        output_model_path=output_model_path,
+        batch_size=batch_size,
+        lr=lr,
+        num_epochs=num_epochs,
+        chunk_size=chunk_size,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        val_ratio=val_ratio,
+        val_dataset_path=val_dataset_path,
+        do_evaluate=do_evaluate,
+        loss_log_interval=loss_log_interval,
+        loss_csv_path=loss_csv_path,
+        use_wandb=use_wandb,
+        wandb_project=wandb_project,
+        wandb_name=wandb_name,
+        lr_scheduler_type=lr_scheduler_type,
+        warmup_steps=warmup_steps,
+        warmup_start_factor=warmup_start_factor,
+        warmup_end_factor=warmup_end_factor,
+        main_scheduler_end_factor=main_scheduler_end_factor,
+        save_checkpoint_every_epoch=save_checkpoint_every_epoch,
+        checkpoint_path=checkpoint_path,
+        cnn_type=cnn_type
+    )
+
+if __name__ == "__main__":
+    main()
+

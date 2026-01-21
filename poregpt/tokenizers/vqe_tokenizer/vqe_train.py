@@ -486,6 +486,7 @@ def vqe_train(
             # 获取排序后的计数值（降序）
             sorted_counts = np.sort(token_counts)[::-1]
             
+            base_ratio = 1/total_tokens if len(sorted_counts) > 0 else 0.0000001
             # 修改top-k ratio的计算方式：出现次数/total_tokens
             # 这样可以直接比较不同codebook_size下的token利用率
             top1_ratio = sorted_counts[0] / total_tokens if len(sorted_counts) > 0 else 0.0
@@ -493,7 +494,22 @@ def vqe_train(
             top5_ratio = sorted_counts[4] / total_tokens if len(sorted_counts) > 4 else 0.0
             top7_ratio = sorted_counts[6] / total_tokens if len(sorted_counts) > 6 else 0.0
             top9_ratio = sorted_counts[8] / total_tokens if len(sorted_counts) > 8 else 0.0
+
+
+            top1_ratio = top1_ratio/base_ratio
+            top3_ratio = top3_ratio/base_ratio
+            top5_ratio = top5_ratio/base_ratio
+            top7_ratio = top7_ratio/base_ratio
+            top9_ratio = top9_ratio/base_ratio
+
             top10_ratio = float(sorted_counts[:min(9, codebook_size)].sum()) / total_tokens if len(sorted_counts) > 9 else 0.0
+
+            top1_ratio = top1_ratio/base_ratio
+            top3_ratio = top3_ratio/base_ratio
+            top5_ratio = top5_ratio/base_ratio
+            top7_ratio = top7_ratio/base_ratio
+            top9_ratio = top9_ratio/base_ratio
+            top10_ratio = top10_ratio/base_ratio
 
             prob = token_counts / total_tokens
             nonzero_prob = prob[prob > 0]

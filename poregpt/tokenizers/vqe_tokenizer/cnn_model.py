@@ -24,6 +24,75 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Literal, Tuple
 
+class Conv1dWithMeanChannel(nn.Module):
+    """
+    Conv1d层，其中第一个输出通道（索引0）是输入信号在卷积核窗口内的均值。
+    其余的输出通道由标准卷积操作生成。
+    注意：此版本的 in_channels 固定为 1，并使用优化的均值计算方法。
+    """
+    def __init__(self, out_channels, kernel_size, stride=1, padding=0, bias=False):
+        super(Conv1dWithMeanChannel, self).__init__()
+        self.in_channels = 1  # 固定为 1
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+
+        if out_channels <= 0:
+            raise ValueError(f"out_channels 必须为正数，得到的是 {out_channels}")
+
+        # 创建一个专门用于计算均值的卷积层
+        # 权重初始化为 1/kernel_size，使得卷积结果为平均值
+        # 偏置设为 0
+        self.mean_conv = nn.Conv1d(
+            in_channels=1,
+            out_channels=1,  # 只需要一个输出通道来存放均值
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=False # 不需要偏置
+        )
+        # 将权重设置为 1/kernel_size
+        with torch.no_grad():
+            self.mean_conv.weight.fill_(1.0 / kernel_size)
+
+        # 我们需要至少1个通道来存放均值。如果 out_channels > 1，
+        # 对其余的 (out_channels - 1) 个通道执行标准卷积。
+        self.use_standard_conv = out_channels > 1
+        if self.use_standard_conv:
+            # 为其余 (out_channels - 1) 个通道创建标准卷积层
+            self.std_conv = nn.Conv1d(1, out_channels - 1, kernel_size, stride=stride, padding=padding, bias=bias)
+
+    def forward(self, x):
+        """
+        前向传播函数。
+
+        Args:
+            x (torch.Tensor): 输入张量，形状为 [Batch_Size, 1, Input_Length] (因为 in_channels 固定为 1)
+
+        Returns:
+            torch.Tensor: 输出张量，形状为 [Batch_Size, out_channels, Output_Length]
+                          其中第一个通道是输入的局部均值。
+        """
+        # --- 计算局部均值 (优化版) ---
+        # 直接使用预设权重的卷积层来计算均值
+        # 该卷积层的权重为 [1/kernel_size, 1/kernel_size, ..., 1/kernel_size]
+        # 卷积运算自动完成了求和与除法，得到均值
+        mean_channel = self.mean_conv(x) # [B, 1, L_out]
+
+        # --- 构造最终输出 ---
+        if not self.use_standard_conv:
+            # 如果只需要1个输出通道，则直接返回计算出的均值通道
+            return mean_channel
+
+        # --- 如果需要更多通道 ---
+        # 对输入x执行标准卷积，生成其余的 (out_channels - 1) 个通道
+        std_conv_out = self.std_conv(x) # [B, out_ch - 1, L_out]
+
+        # 将计算出的均值通道（作为第一个）与标准卷积的结果通道拼接起来
+        output = torch.cat([mean_channel, std_conv_out], dim=1) # [B, out_ch, L_out]
+
+        return output
 
 class NanoporeCNNModel(nn.Module):
     """Nanopore 信号重建用纯卷积自编码器（无 VQ）。"""
@@ -49,6 +118,10 @@ class NanoporeCNNModel(nn.Module):
             self.latent_dim = 512
             self.cnn_stride = 12
             self.receptive_field = 65
+        elif cnn_type == 3:
+            self.latent_dim = 64
+            self.cnn_stride = 5
+            self.receptive_field = 33
 
         # 构建网络
         if cnn_type == 0:
@@ -57,9 +130,12 @@ class NanoporeCNNModel(nn.Module):
         elif cnn_type == 1:
             self._build_encoder_type1()
             self._build_decoder_type1()
-        else:  # cnn_type == 2
+        elif cnn_type == 2:  # cnn_type == 2
             self._build_encoder_type2()
             self._build_decoder_type2()
+        elif cnn_type == 3:
+            self._build_encoder_type3()
+            self._build_decoder_type3()
 
     # 现代 CNN  遵循“Conv → BN → Act” 的惯例。
     # nn.SiLU()  # 等价于 x * torch.sigmoid(x)
@@ -141,7 +217,26 @@ class NanoporeCNNModel(nn.Module):
             nn.Conv1d(128, self.latent_dim, kernel_size=5, stride=2, padding=2, bias=False),
             nn.BatchNorm1d(self.latent_dim),
         )
+    def _build_encoder_type3(self) -> None:
+        """构建 cnn_type=1 的 encoder：1 → 16 → 32 → 64（严格对称）
+        Modified: First layer has the first channel as local mean.
+        """
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 16, 第一个通道(kernel_size=5区域内的均值)，其余15个通道来自标准卷积
+            # 注意：调用时不再需要传入 in_channels，因为它已被固定为 1
+            Conv1dWithMeanChannel(out_channels=16, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
 
+            # Layer 2: 16 → 32
+            nn.Conv1d(16, 32, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Layer 3: 32 → 64, stride=5, RF=33
+            nn.Conv1d(32, 64, kernel_size=25, stride=5, padding=12, bias=False),
+            nn.BatchNorm1d(64),
+        )
     def _build_decoder_type0(self) -> None:
         """构建大容量 decoder（256 → 128 → 64 → 1）"""
         self.decoder = nn.Sequential(
@@ -221,7 +316,31 @@ class NanoporeCNNModel(nn.Module):
             # 最后一层：只卷积，不加BN和激活
             nn.Conv1d(64, 1, kernel_size=5, padding=2, bias=True),
         )
-    
+   
+    def _build_decoder_type3(self) -> None:
+        """构建 cnn_type=1 的 decoder（严格对称：64 → 32 → 16 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 64 → 32
+            nn.ConvTranspose1d(
+                in_channels=64,
+                out_channels=32,
+                kernel_size=25,
+                stride=5,
+                padding=12,
+                output_padding=0,
+                bias=False,
+            ),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 32 → 16
+            nn.Conv1d(32, 16, kernel_size=5, padding=2,bias=False),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+            # Inverse of encoder Layer 1: 16 → 1
+            nn.Conv1d(16, 1, kernel_size=5, padding=2,bias=True)
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """前向传播"""
         if x.ndim != 3 or x.shape[1] != 1:
