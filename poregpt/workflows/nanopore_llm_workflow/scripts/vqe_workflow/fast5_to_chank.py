@@ -5,7 +5,7 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import traceback
 from pathlib import Path
-from ...utils.signal import nanopore_process_signal
+from poregpt.utils.signal import nanopore_process_signal
 import argparse
 
 
