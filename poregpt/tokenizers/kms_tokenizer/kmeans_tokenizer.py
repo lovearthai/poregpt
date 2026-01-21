@@ -1,13 +1,68 @@
 
-from .signal_normal import nanopore_normalize, nanopore_filter_signal
+from ...utils.signal import nanopore_process_signal
+from .process_data import sliding_window_chunks,process_read
 import faiss
 import gzip
 import json
 from tqdm import tqdm
 from ont_fast5_api.fast5_interface import get_fast5_file
 import numpy as np
+from abc import ABC, abstractmethod
+import os
 
-class KmeansTokenizer:
+# 基类：抽象类
+class InterfaceTokenizer(ABC):
+    @abstractmethod
+    def tokenize_data(self, signal: np.ndarray) -> list:
+        """将原始信号数据转换为 token 字符串"""
+        pass
+
+    @abstractmethod
+    def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
+        """将测序读段（read）对象转换为 token 字符串"""
+        pass
+
+    @abstractmethod
+    def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple"):
+        """从 FAST5 文件中读取信号并保存 token 到输出路径"""
+        pass
+
+# 全局 FAISS 索引（每个子进程初始化一次）
+_GLOBAL_INDEX = None
+
+def init_worker(centroids_path: str, use_gpu: bool = True, gpu_id: int = 0):
+    global _GLOBAL_INDEX
+    if _GLOBAL_INDEX is not None:
+        return
+    data = np.load(centroids_path)
+    centroids = data['centroids'].astype(np.float32)
+    d = centroids.shape[1]
+
+    if use_gpu and hasattr(faiss, 'StandardGpuResources'):
+        # === GPU 模式 ===
+        print("🚀 Initializing FAISS GPU index...")
+        res = faiss.StandardGpuResources()  # GPU 资源管理器
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(centroids) # type: ignore
+        # 将 CPU 索引搬到 GPU（默认 device=0）
+        _GLOBAL_INDEX = faiss.index_cpu_to_gpu(res, gpu_id, cpu_index)
+        # print(f"✅ FAISS GPU index ready on device {gpu_id}, {centroids.shape[0]} centroids")
+    else:
+        # === CPU 回退模式 ===
+        print("💻 Using FAISS CPU index...")
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(centroids) # type: ignore
+        _GLOBAL_INDEX = cpu_index
+        
+def tokenize_signal_with_global_index(signal: np.ndarray) -> list: 
+    _, I = _GLOBAL_INDEX.search(signal, 1) # type: ignore
+    cluster_ids = I[:, 0].tolist()
+
+    parts = []
+    for token_id in cluster_ids:
+        parts.append(f"<|bwav:{int(token_id) + 128}|>") # token_id 偏移 128，避免与特殊符号冲突
+    return parts
+class KmeansTokenizer(InterfaceTokenizer):
     """
     Nanopore RVQ Tokenizer 封装类。
 
@@ -23,122 +78,49 @@ class KmeansTokenizer:
         """
         初始化 tokenizer。
         """
-        data = np.load(centroids_path, allow_pickle=True).item()
-        self.window_size = data["dimension"]
+        data = np.load(centroids_path)
+        self.window_size = data["dim"]
         self.stride = data["stride"]
-        self.index = self._init_worker(data["centroids"])
+        init_worker(centroids_path)
 
-    def _init_worker(self, centroids):
-        d = centroids.shape[1]
-        if hasattr(faiss, 'StandardGpuResources'):
-        # === GPU 模式 ===
-            print("🚀 Initializing FAISS GPU index...")
-            res = faiss.StandardGpuResources()  # GPU 资源管理器
-            cpu_index = faiss.IndexFlatL2(d)
-            cpu_index.add(centroids) # type: ignore
-            # 将 CPU 索引搬到 GPU（默认 device=0）
-            index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
-        else:
-            # === CPU 回退模式 ===
-            print("💻 Using FAISS CPU index...")
-            cpu_index = faiss.IndexFlatL2(d)
-            cpu_index.add(centroids) # type: ignore
-            index = cpu_index
-        return index
-    
-    def _sliding_window_chunks(self, signal):
-        """
-        对一维信号进行滑动窗口切片。
-
-        Args:
-            signal (np.ndarray): 一维归一化信号
-            window_size (int): 窗口长度
-            stride (int): 步长
-
-        Returns:
-            list of tuples: 每个元素是一个三元组 (start, end, vector)，其中：
-                            - start 是切片在原始信号中的起始索引
-                            - end 是切片在原始信号中的结束索引（不包含）
-                            - vector 是切片本身的值
-        """
-        n_points = len(signal)
-        if n_points < self.window_size:
+    def tokenize_data(self, signal: np.ndarray) -> list:
+        if signal.size == 0:
             return []
-
-        chunks_info = []
-        start = 0
-        while start + self.window_size <= n_points:
-            end = start + self.window_size
-            chunk = signal[start:end]
-            chunks_info.append((start, end, chunk))
-            start += self.stride
-        return chunks_info
-
-    def tokenize_data(self, signal: np.ndarray) -> str:
-        # Normalize
-        norm_sig_no_filter = nanopore_normalize(signal)
-        norm_sig = nanopore_filter_signal(norm_sig_no_filter) # 进行去噪处理
-        if norm_sig.size == 0:
-            return ""
-        vec_list = []
-        chunks_info = self._sliding_window_chunks(norm_sig)
-        for _, _, chunk in chunks_info:
-            if chunk.size == 0:
-                continue
-            vec_list.append(chunk)
+        vec_list = sliding_window_chunks(signal, self.window_size, self.stride)
         if not vec_list:
-            return ""
+            return []
         try:
             X = np.stack(vec_list, axis=0).astype(np.float32)
         except Exception:
-            return ""
-        _, I = self.index.search(X, 1) # type: ignore
-        cluster_ids = I[:, 0].tolist()
-
-        tokens = ''.join(f"<|bwav:{int(cid)}|>" for cid in cluster_ids)
-
-        return tokens
+            return []
+        return tokenize_signal_with_global_index(X)
 
 
-    def tokenize_read(self, read) -> str:
-        """
-        直接 tokenize 一个 ont_fast5_api read 对象，返回格式化 token 字符串。
+    def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
+        signal_raw = process_read(read)
+        if signal_raw is None:
+            return []
 
-        Args:
-            read: fast5 read object
-            token_type: "L1", "L2", "L3", or "L4"
+        signal_processed = nanopore_process_signal(signal_raw,nanopore_signal_process_strategy)
+        if signal_processed is None:
+            return []
+        return self.tokenize_data(signal_processed)
 
-        Returns:
-            str: formatted token string
-        """
-        # --- Scale ---
-        channel_info = read.handle[read.global_key + 'channel_id'].attrs
-        offset = int(channel_info['offset'])
-        scaling = channel_info['range'] / channel_info['digitisation']
-        raw = read.handle[read.raw_dataset_name][:]
-        scaled = np.array(scaling * (raw + offset), dtype=np.float32)
-
-        return self.tokenize_data(scaled)
 
  
-    def tokenize_fast5(self, fast5_path: str, output_path: str):
-        print(f"✅ Process {fast5_path}")
-        """内部方法：处理单个 FAST5 → JSONL.GZ"""
+    def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple"):
+        print(f"✅ Processing {fast5_path} with strategy{nanopore_signal_process_strategy}")
         results = []
         with get_fast5_file(fast5_path, mode="r") as f5:
-            for read in tqdm(f5.get_reads()):
+            for read in tqdm(f5.get_reads(), desc=os.path.basename(fast5_path)):
                 try:
-                    token_str = self.tokenize_read(read)
-    
-                    results.append({
-                        "id": read.read_id,
-                        "text": token_str
-                    })
+                    token_list = self.tokenize_read(read,nanopore_signal_process_strategy)
+                    token_str = "".join(token_list)
+                    results.append({"id": read.read_id, "text": token_str})
                 except Exception as e:
-                    print(f"❌ Error on read {read.read_id} in {fast5_path}: {e}")
+                    print(f"❌ Failed on read {read.read_id}: {e}")
                     continue
-    
-        # Save
+
         with gzip.open(output_path, 'wt', encoding='utf-8') as f:
             for item in results:
                 f.write(json.dumps(item) + '\n')
