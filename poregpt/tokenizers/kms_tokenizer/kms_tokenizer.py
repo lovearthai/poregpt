@@ -62,7 +62,7 @@ def tokenize_signal_with_global_index(signal: np.ndarray) -> list:
     for token_id in cluster_ids:
         parts.append(f"<|bwav:{int(token_id) + 128}|>") # token_id 偏移 128，避免与特殊符号冲突
     return parts
-class KmeansTokenizer(InterfaceTokenizer):
+class KMSTokenizer(InterfaceTokenizer):
     """
     Nanopore RVQ Tokenizer 封装类。
 
