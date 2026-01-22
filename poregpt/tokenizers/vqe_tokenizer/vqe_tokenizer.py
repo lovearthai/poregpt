@@ -290,6 +290,17 @@ class VQETokenizer:
             parts.append(f"<|bwav:{int(token_id)}|>")
         return parts
 
+    # tokenize_data不支持任何归一化, medf, lpf等操作
+    def tokenize_chunk(self, signal: np.ndarray) -> list:
+        flat_tokens = self._tokenize_chunked_signal(signal)
+        if flat_tokens.size == 0:
+            return []
+        parts = []
+        for token_id in flat_tokens:
+            parts.append(f"<|bwav:{int(token_id)}|>")
+        return parts
+
+
 
     def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
         try:

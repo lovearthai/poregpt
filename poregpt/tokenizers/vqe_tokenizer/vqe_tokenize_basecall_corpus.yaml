@@ -1,0 +1,5 @@
+# config.yaml
+fast5_dir: "/path/to/your/validation" # 你的 FAST5 文件所在目录
+csv_path: "validation_cyclone.csv"    # 你的输入 CSV 文件路径
+model_path: "/path/to/your/vqe_model.pth" # 你的 VQE 模型文件路径
+signal_strategy: "apple"              # 信号处理策略
