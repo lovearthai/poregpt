@@ -1,0 +1,6 @@
+# config.yaml
+fast5_dir: "/mnt/nas_syy/default/poregpt/shared/dataset/dna/human_min0_max2_read96655/fast5/validation" # 你的 FAST5 文件所在目录
+csv_path: "/mnt/nas_syy/default/poregpt/shared/dataset/dna/human_min0_max2_read96655/fast5/validation_cyclone.csv"    # 你的输入 CSV 文件路径
+model_path: "/mnt/nas_syy/default/poregpt/shared/vqe_models_pass20_init_codebook_cnn_and_finetuned/checkpoints/porepgt_vqe_tokenizer.spoch38000.pth" # 你的 VQE 模型文件路径
+signal_strategy: "apple"              # 信号处理策略
+
