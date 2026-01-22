@@ -1,5 +1,5 @@
 
-from ...utils.signal import nanopore_process_signal
+from poregpt.utils import nanopore_process_signal
 from .process_data import sliding_window_chunks,process_read
 import faiss
 import gzip
