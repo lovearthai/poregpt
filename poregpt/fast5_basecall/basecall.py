@@ -19,7 +19,7 @@ from ont_fast5_api.fast5_interface import get_fast5_file
 import torch
 from typing import Dict, Optional, Tuple, Union, Literal, List
 # from ..tokenizers import VQTokenizer
-# from nanopore_signal_tokenizer import KmeansTokenizer
+# from nanopore_signal_tokenizer import KMSTokenizer
 import json
 import gzip
 
@@ -107,7 +107,7 @@ def fast5_to_word(
         # required = {'window_size', 'stride'}
         # if not required.issubset(kwargs_kmeans):
             # raise ValueError("kwargs_kmeans must contain 'window_size' and 'stride'.")
-        tokenizer = KmeansTokenizer(
+        tokenizer = KMSTokenizer(
             # window_size=kwargs_kmeans['window_size'], 
             # stride=kwargs_kmeans['stride'],
             centroids_path=model_path

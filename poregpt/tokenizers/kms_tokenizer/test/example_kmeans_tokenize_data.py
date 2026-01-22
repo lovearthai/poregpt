@@ -1,8 +1,8 @@
 import numpy as np
-from poregpt.tokenizers.kms_tokenizer.kmeans_tokenizer import KmeansTokenizer
+from poregpt.tokenizers.kms_tokenizer import KMSTokenizer
 from poregpt.utils.signal import nanopore_process_signal
 if __name__ == "__main__":
-    tokenizer = KmeansTokenizer(
+    tokenizer = KMSTokenizer(
         centroids_path="../models/centroids_meta.npz",
     )
     window_size = tokenizer.window_size
