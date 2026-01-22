@@ -88,3 +88,7 @@ Thumbs.db
 test_*.py
 demo.*
 *.out
+
+
+# Weights & Biases logs (alternative syntax)
+**/wandb/**
