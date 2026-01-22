@@ -5,5 +5,6 @@ Top-level package for Nanopore Signal Tokenization.
 
 # 可选：暴露顶层接口（按需）
 from .vqe_tokenizer import VQETokenizer
+from .kms_tokenizer import KMSTokenizer
 
 __version__ = "0.1.0"
