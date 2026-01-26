@@ -521,7 +521,6 @@ def vqe_train(
                 drop_last=True
             )
             #val_loader = accelerator.prepare(val_loader) # Often not necessary for eval loader
-        print(f"val_loader:{len(val_loader)}")
 
 
     # ========================
@@ -581,21 +580,21 @@ def vqe_train(
         actual_warmup_steps = min(warmup_steps, total_training_global_steps)
         main_steps = max(1, total_training_global_steps - actual_warmup_steps)
 
-        actual_warmup_steps = actual_warmup_steps * accelerator.num_processes
-        total_training_global_steps = total_training_global_steps * accelerator.num_processes
+        scheduler_actual_warmup_steps = actual_warmup_steps * accelerator.num_processes
+        scheduler_main_steps = main_steps * accelerator.num_processes
 
         warmup_scheduler = LinearLR(
             optimizer, 
             start_factor=warmup_start_factor, 
             end_factor=warmup_end_factor, 
-            total_iters=actual_warmup_steps
+            total_iters=scheduler_actual_warmup_steps
         )
         
         if lr_scheduler_type == "cosine":
             eta_min = lr * main_scheduler_end_factor # e.g., 5e-5 * 1e-6 = 5e-11
             main_scheduler = CosineAnnealingLR(
                 optimizer, 
-                T_max=main_steps, 
+                T_max=scheduler_main_steps, 
                 eta_min=eta_min
             )
         elif lr_scheduler_type == "linear":
@@ -605,7 +604,7 @@ def vqe_train(
                 optimizer, 
                 start_factor=1.0, 
                 end_factor=relative_end_factor, 
-                total_iters=main_steps
+                total_iters=scheduler_main_steps
             )
         else:
             raise ValueError(f"Unsupported lr_scheduler_type: {lr_scheduler_type}")
@@ -614,7 +613,7 @@ def vqe_train(
         scheduler = SequentialLR(
             optimizer, 
             schedulers=[warmup_scheduler, main_scheduler], 
-            milestones=[actual_warmup_steps]
+            milestones=[scheduler_actual_warmup_steps]
         )
         
         # Prepare scheduler with Accelerate
@@ -623,7 +622,7 @@ def vqe_train(
     # Resume from Checkpoint
     # ========================
     start_epoch = start_spoch = start_global_step = 0
-    if checkpoint_path and os.path.isfile(checkpoint_path):
+    if checkpoint_path and os.path.isdir(checkpoint_path):
         if accelerator.is_main_process:
             print(f"📥 Loading checkpoint from: {checkpoint_path}")
         # Load state using Accelerate. This loads model, optimizer, scheduler, and RNG states.

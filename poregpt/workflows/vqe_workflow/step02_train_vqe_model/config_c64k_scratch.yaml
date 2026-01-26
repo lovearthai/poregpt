@@ -15,7 +15,7 @@ output_model_path: "models/porepgt_vqe_tokenizer"
 loss_csv_path: "train_loss.csv"
 # 从指定路径加载检查点以恢复训练 (可选，留空或设为 null 以从头开始)
 # 示例: "models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
-checkpoint_path: ""
+#checkpoint_path: "/mnt/nas_syy/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step02_train_vqe_model/models_pass25/porepgt_vqe_tokenizer.step1000.pth"
 # 训练多少个 spoch 后保存一次模型检查点
 # Spoch 是指每 update_loss_weight_every 次迭代后的一个周期单位
 save_checkpoint_every_spoch: 500
