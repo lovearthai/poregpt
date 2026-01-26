@@ -21,7 +21,7 @@ training:
   # 每个 .npy 文件的信号长度
   chunk_size: 12000
   # 数据加载线程数
-  num_workers: 16
+  num_workers: 32
   # 验证集采样比例
   val_ratio: 0.5
   # 损失日志记录间隔步数
@@ -29,9 +29,9 @@ training:
   # 检查点保存路径
   checkpoint_path: "models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
   # CNN 类型
-  cnn_type: 3
+  cnn_type: 5
   # prefetch_factor (不在 shell 脚本中，使用默认值)
-  prefetch_factor: 32
+  prefetch_factor: 64
 
 # 日志和验证相关配置
 logging:
@@ -42,7 +42,7 @@ logging:
   # wandb 项目名
   wandb_project: "nanopore_vq" # 代码中默认值
   # wandb 运行名
-  wandb_name: "train_cnn3"
+  wandb_name: "train_cnn5"
 
 # 学习率调度器相关配置
 scheduler:
