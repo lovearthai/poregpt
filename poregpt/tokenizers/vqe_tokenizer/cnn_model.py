@@ -97,11 +97,11 @@ class Conv1dWithMeanChannel(nn.Module):
 class NanoporeCNNModel(nn.Module):
     """Nanopore 信号重建用纯卷积自编码器（无 VQ）。"""
 
-    def __init__(self, cnn_type: Literal[0, 1, 2,3] = 1) -> None:
+    def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5] = 1) -> None:
         super().__init__()
 
-        if cnn_type not in (0, 1, 2,3):
-            raise ValueError(f"`cnn_type` must be 0, 1 or 2,3 got {cnn_type}.")
+        if cnn_type not in (0, 1, 2,3,4,5):
+            raise ValueError(f"`cnn_type` must be 0, 1 or 2,3,4,5 got {cnn_type}.")
 
         self.cnn_type: int = cnn_type
 
@@ -122,6 +122,14 @@ class NanoporeCNNModel(nn.Module):
             self.latent_dim = 64
             self.cnn_stride = 5
             self.receptive_field = 33
+        elif cnn_type == 4:
+            self.latent_dim = 32
+            self.cnn_stride = 5
+            self.receptive_field = 33
+        elif cnn_type == 5:
+            self.latent_dim = 16
+            self.cnn_stride = 5
+            self.receptive_field = 33
 
         # 构建网络
         if cnn_type == 0:
@@ -136,6 +144,14 @@ class NanoporeCNNModel(nn.Module):
         elif cnn_type == 3:
             self._build_encoder_type3()
             self._build_decoder_type3()
+        elif cnn_type == 4:
+            self._build_encoder_type4()
+            self._build_decoder_type4()
+        elif cnn_type == 5:
+            self._build_encoder_type5()
+            self._build_decoder_type5()
+
+
 
     # 现代 CNN  遵循“Conv → BN → Act” 的惯例。
     # nn.SiLU()  # 等价于 x * torch.sigmoid(x)
@@ -237,6 +253,46 @@ class NanoporeCNNModel(nn.Module):
             nn.Conv1d(32, 64, kernel_size=25, stride=5, padding=12, bias=False),
             nn.BatchNorm1d(64),
         )
+
+    def _build_encoder_type4(self) -> None:
+        """构建 cnn_type=4 的 encoder：1 → 8 → 16 → 32（严格对称）
+        Modified: First layer has the first channel as local mean.
+        """
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 8, 第一个通道(kernel_size=5区域内的均值)，其余7个通道来自标准卷积
+            Conv1dWithMeanChannel(out_channels=8, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(8),
+            nn.SiLU(),
+
+            # Layer 2: 8 → 16
+            nn.Conv1d(8, 16, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+
+            # Layer 3: 16 → 32, stride=5, RF=33
+            nn.Conv1d(16, 32, kernel_size=25, stride=5, padding=12, bias=False),
+            nn.BatchNorm1d(32),
+        )
+    def _build_encoder_type5(self) -> None:
+        """构建 cnn_type=4 的 encoder：1 → 8 → 16 → 32（严格对称）
+        Modified: First layer has the first channel as local mean.
+        """
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 8, 第一个通道(kernel_size=5区域内的均值)，其余7个通道来自标准卷积
+            Conv1dWithMeanChannel(out_channels=4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(4),
+            nn.SiLU(),
+
+            # Layer 2: 8 → 16
+            nn.Conv1d(4, 8, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(8),
+            nn.SiLU(),
+
+            # Layer 3: 16 → 32, stride=5, RF=33
+            nn.Conv1d(8, 16, kernel_size=25, stride=5, padding=12, bias=False),
+            nn.BatchNorm1d(16),
+        )
+
     def _build_decoder_type0(self) -> None:
         """构建大容量 decoder（256 → 128 → 64 → 1）"""
         self.decoder = nn.Sequential(
@@ -339,6 +395,54 @@ class NanoporeCNNModel(nn.Module):
             nn.SiLU(),
             # Inverse of encoder Layer 1: 16 → 1
             nn.Conv1d(16, 1, kernel_size=5, padding=2,bias=True)
+        )
+    def _build_decoder_type4(self) -> None:
+        """构建 cnn_type=1 的 decoder（严格对称：32 → 16 → 8 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 32 → 16
+            nn.ConvTranspose1d(
+                in_channels=32,
+                out_channels=16,
+                kernel_size=25,
+                stride=5,
+                padding=12,
+                output_padding=0,
+                bias=False,
+            ),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 16 → 8
+            nn.Conv1d(16, 8, kernel_size=5, padding=2, bias=False),
+            nn.BatchNorm1d(8),
+            nn.SiLU(),
+            
+            # Inverse of encoder Layer 1: 8 → 1
+            nn.Conv1d(8, 1, kernel_size=5, padding=2, bias=True)
+        )
+    def _build_decoder_type5(self) -> None:
+        """构建 cnn_type=1 的 decoder（严格对称：16 → 8 → 4 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 32 → 16
+            nn.ConvTranspose1d(
+                in_channels=16,
+                out_channels=8,
+                kernel_size=25,
+                stride=5,
+                padding=12,
+                output_padding=0,
+                bias=False,
+            ),
+            nn.BatchNorm1d(8),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 16 → 8
+            nn.Conv1d(8, 4, kernel_size=5, padding=2, bias=False),
+            nn.BatchNorm1d(4),
+            nn.SiLU(),
+            
+            # Inverse of encoder Layer 1: 8 → 1
+            nn.Conv1d(4, 1, kernel_size=5, padding=2, bias=True)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
