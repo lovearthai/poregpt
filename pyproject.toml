@@ -36,3 +36,4 @@ poregpt-vqe-tokenize-trank = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_tran
 poregpt-vqe-tokenize-fast5 = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_fast5:main"
 poregpt-vqe-tokenize-fast5-batched = "poregpt.tokenizers.vqe_tokenizer.vqe_tokenize_fast5_batched:main"
 poregpt-vqe-fast5-to-chank = "poregpt.tokenizers.vqe_tokenizer.fast5_to_chank:main"
+poregpt-kms-tokenize-basecall-corpus = "poregpt.tokenizers.kms_tokenizer.kms_tokenize_basecall_corpus:main"
