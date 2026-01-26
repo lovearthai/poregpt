@@ -1,6 +1,6 @@
 import numpy as np
 from poregpt.tokenizers.kms_tokenizer import KMSTokenizer
-from poregpt.utils.signal import nanopore_process_signal
+from poregpt.utils import nanopore_process_signal
 if __name__ == "__main__":
     tokenizer = KMSTokenizer(
         centroids_path="../models/centroids_meta.npz",
