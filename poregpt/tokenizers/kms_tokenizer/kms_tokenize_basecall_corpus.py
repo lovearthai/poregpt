@@ -13,6 +13,8 @@ import torch
 from ...utils.signal import nanopore_process_signal
 import time
 
+token_batch_size=8000
+
 def process_single_fast5(fast5_path, csv_path, model_path, device, nanopore_signal_process_strategy="apple"):
     """
     处理单个 FAST5 文件及其对应的 CSV 文件。
@@ -29,8 +31,8 @@ def process_single_fast5(fast5_path, csv_path, model_path, device, nanopore_sign
 
     # 初始化 tokenizer 并指定设备
     tokenizer = KMSTokenizer(
-        model_ckpt=model_path,
-        token_batch_size=8000
+        centroids_path=model_path,
+        gpu_id=device
     )
 
     # 检查输入文件是否存在
@@ -108,7 +110,7 @@ def process_single_fast5(fast5_path, csv_path, model_path, device, nanopore_sign
 
                     # --- 标记化片段 ---
                     # time0 = time.time() # 可选：取消注释以测量时间
-                    tokens = tokenizer.tokenize_chunk(chunk_signal)
+                    tokens = tokenizer.tokenize_data(chunk_signal)
                     text = "".join(tokens)
                     # time1 = time.time() # 可选：取消注释以测量时间
                     # time_cost = time1 - time0 # 可选：取消注释以测量时间
@@ -182,7 +184,7 @@ def main():
         fast5_path=fast5_path,
         csv_path=csv_path,
         model_path=model_path,
-        device=device,
+        device=int(device),
         nanopore_signal_process_strategy=signal_strategy
     )
 

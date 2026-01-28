@@ -6,8 +6,8 @@
 
 # --- 配置区域 ---
 FAST5_DIR="/mnt/nas_syy/default/poregpt/shared/dataset/dna/human_min0_max2_read96655/fast5/validation" 
-OUTPUT_ROOT="/mnt/nas_syy/default/poregpt/shared/dataset/dna/human_min0_max2_read96655/fast5/validation" 
-MODEL_CKPT="/mnt/nas_syy/default/olmo_pt_bioseq/olmo_pt_020m_bwavkms8k_rna_80g/HF_20m_DNA_KMS16K_W32S5_V20260121/encoder/centroids_meta.npz"
+OUTPUT_ROOT="/mnt/nas_syy/default/poregpt/shared/dataset/dna/human_min0_max2_read96655/fast5/validation/1" 
+MODEL_CKPT="/mnt/nas_syy/default/olmo_pt_bioseq/olmo_pt_020m_bwavkms8k_rna_80g/HF_20m_DNA_KMS16K_W16S3_V20260121/encoder/centroids_meta.npz"
 PYTHON_SCRIPT_PATH="/path/to/your/vqe_tokenize_single_fast5.py" # 修改为你的 Python 脚本的实际路径
 NUM_GPUS=4
 MAX_CONCURRENT=32  # 总并发数

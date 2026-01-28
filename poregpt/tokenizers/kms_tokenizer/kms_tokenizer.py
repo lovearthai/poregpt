@@ -74,6 +74,7 @@ class KMSTokenizer(InterfaceTokenizer):
     def __init__(
         self,
         centroids_path: str,
+        gpu_id: int = 0,
     ):
         """
         初始化 tokenizer。
@@ -81,7 +82,7 @@ class KMSTokenizer(InterfaceTokenizer):
         data = np.load(centroids_path)
         self.window_size = data["dim"]
         self.stride = data["stride"]
-        init_worker(centroids_path)
+        init_worker(centroids_path, use_gpu=True, gpu_id=gpu_id)
 
     def tokenize_data(self, signal: np.ndarray) -> list:
         if signal.size == 0:
