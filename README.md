@@ -202,10 +202,24 @@ RVQ Tokenizer 使用示例：参考 test/ 目录下 example_rvq_tokenizer_data.p
 KMeans Tokenizer 使用示例：参考 test/ 目录下 example_kmeans_tokenize_data.py。
 
 
+# 数据处理
+
 
 # basecall语料准备
 
 ## 对一批fast5文件计算对应的out_summary.processed.tsv文件和对应的references.npy文件
+
+### 把out_summary.handle.tsv加工成out_summary.handle.processed.tsv
+
+filename        read_id alignment_identity
+validation_00006.fast5  250F701901011_23_2561_1360_397804127_558818:3000:6000   1.0
+validation_00006.fast5  250F701901011_23_2561_1360_397804127_558818:6000:6000   1.0
+validation_00006.fast5  250F701901011_23_2561_1360_397804127_558818:9000:6000   1.0
+validation_00006.fast5  250F701901011_23_2561_1360_397804127_558818:12000:6000  1.0
+将out_summary.handle.tsv文件的字段做加工，把read_id字段根据冒号分成read_id,chunk_start, chunk_size, 
+这个out_summary.handle.tsv是basecall流程出来的文件
+
+脚本process_handle_tsv.sh 就是做这个事情
 
 ### out_summary.processed.tsv 这个文件里的格式如下
 filename        read_id chunk_start     chunk_size      alignment_identity
@@ -226,5 +240,52 @@ Size in bytes: 409278582
 同时打开这两个文件，将npy里对应的数组读出来，把里面的0去掉。保存成12345这样的字符串， 然后增加一项 bases 用来表达这些数字字符串。 最后保存成csv: 表头是fast5, read_id, chunk_start, chunk_size, alignment_identity, bases
 
 脚本: merge_tsv_and_npy_to_bccsv.sh 就是来执行这个合并操作， 它的功能是递归遍历一个目录下的所有子目录，如果这个子目录中有out_summary.processed.tsv和references.npy，合并成一个以子目录命名的.bc.csv文件。并且用multiprocessing_pool来并行处理。
+
+## 调用merge_and_split_bccsv.sh脚本按照fast5文件名生成对应的bc.csv
+
+前序流程会在不同batch_*子目录下生成多个bc.csv文件
+
+```
+(base) root::basecall# find test -type f -name "*.bc.csv"
+test/batch_23/batch_23.bc.csv
+test/batch_26/batch_26.bc.csv
+test/batch_28/batch_28.bc.csv
+test/batch_31/batch_31.bc.csv
+test/batch_34/batch_34.bc.csv
+test/batch_43/batch_43.bc.csv
+test/batch_46/batch_46.bc.csv
+test/batch_48/batch_48.bc.csv
+test/batch_11/batch_11.bc.csv
+test/batch_14/batch_14.bc.csv
+test/batch_3/batch_3.bc.csv
+```
+
+因为之前开发逻辑的问题，它的bc.csv中包含了多个fast5文件, 所以要这些bc.csv合并之后再按照fast5名字进行拆分
+
+(bonito_py310) jiaoshuai::step07_tokenize_basecall_corpus$ ./merge_and_split_bccsv.sh
+🔍 正在递归扫描目录: /mnt/nas_syy/default/poregpt/dataset/human_dna_595g/basecall/validation
+📂 找到了 25 个 .bc.csv 文件。
+🔄 开始合并所有数据...
+📊 合并后总共有 9315839 行数据。
+📁 正在按 'fast5' 列进行分组...
+📦 分成了 244 个组。
+💾 [1/244] 正在写入: validation_00001.bc.csv (35556 行)
+💾 [2/244] 正在写入: validation_00002.bc.csv (34471 行)
+💾 [3/244] 正在写入: validation_00003.bc.csv (33878 行)
+💾 [4/244] 正在写入: validation_00004.bc.csv (36577 行)
+💾 [5/244] 正在写入: validation_00005.bc.csv (38281 行)
+💾 [6/244] 正在写入: validation_00006.bc.csv (36288 行)
+💾 [7/244] 正在写入: validation_00007.bc.csv (38814 行)
+💾 [8/244] 正在写入: validation_00008.bc.csv (34223 行)
+💾 [9/244] 正在写入: validation_00009.bc.csv (39729 行)
+💾 [10/244] 正在写入: validation_00010.bc.csv (35723 行)
+💾 [11/244] 正在写入: validation_00011.bc.csv (38661 行)
+
+## 将生成的bc.csv联通对应的fast5转换成bc.jsonl.gz
+
+使用4卡A40进行转换
+run_a40_batch_vqe84s286000_dna595g_validation.sh
+
+其主要是执行poregpt-vqe-tokenize-basecall-corpus 脚本，配对bc.csv+fast5生成jsonl.gz文件
 
 

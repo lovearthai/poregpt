@@ -262,7 +262,7 @@ class VQETokenizer:
             padded = np.pad(signal, (0, self.chunk_size - L), mode='constant')
             x = torch.from_numpy(padded).float().unsqueeze(0).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                recon,level_tokens,loss,tokens = self.model(x)  # returns [B, T] or [B, T, 1] → squeeze to [T]
+                recon,tokens,loss,tokens_2 = self.model(x)  # returns [B, T] or [B, T, 1] → squeeze to [T]
             tokens = tokens.squeeze(0).cpu().numpy()
             if tokens.ndim == 2:
                 tokens = tokens[:, 0]  # take first (and only) layer

@@ -216,10 +216,10 @@ class Conv1dWithMeanAndThresholdChannels(nn.Module):
 class NanoporeCNNModel(nn.Module):
     """Nanopore 信号重建用纯卷积自编码器（无 VQ）。"""
 
-    def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5,6,7,8,9,10,11,12] = 1) -> None:
+    def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,25] = 1) -> None:
         super().__init__()
 
-        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10,11,12):
+        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24):
             raise ValueError(f"`cnn_type` must be 0, 1 or 2,3,4,5 got {cnn_type}.")
 
         self.cnn_type: int = cnn_type
@@ -301,6 +301,91 @@ class NanoporeCNNModel(nn.Module):
             self.stride = 4
             self.receptive_field = 49
             self.RF = 49
+        elif cnn_type == 13:
+            self._build_cnn_type13()
+            self.out_channels = 768
+            self.stride = 5
+            self.receptive_field = 27
+            self.RF = 27
+        elif cnn_type == 14:
+            self._build_cnn_type13()
+            self.out_channels = 1024
+            self.stride = 5
+            self.receptive_field = 27
+            self.RF = 27
+        elif cnn_type == 15:
+            self._build_cnn_type13()
+            self.out_channels = 512
+            self.stride = 5
+            self.receptive_field = 27
+            self.RF = 27
+        elif cnn_type == 16:
+            self._build_cnn_type16()
+            self.out_channels = 512
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 17:
+            self._build_cnn_type17()
+            self.out_channels = 4
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 18:
+            self._build_cnn_type18()
+            self.out_channels = 4
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 19:
+            self._build_cnn_type19()
+            self.out_channels = 8
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 20:
+            self._build_cnn_type20()
+            self.out_channels = 16
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 21:
+            self._build_cnn_type21()
+            self.out_channels = 4
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 22:
+            self._build_cnn_type22()
+            self.out_channels = 3
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 23:
+            self._build_cnn_type23()
+            self.out_channels = 2
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 24:
+            self._build_cnn_type24()
+            self.out_channels = 4
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+        elif cnn_type == 25:
+            self._build_cnn_type25()
+            self.out_channels = 4
+            self.stride = 4
+            self.receptive_field = 49
+            self.RF = 49
+
+
+
+
+
+
+
 
 
 
@@ -967,6 +1052,795 @@ class NanoporeCNNModel(nn.Module):
             # L1 Inverse: 64 -> 1
             nn.Conv1d(64, 1, kernel_size=5, stride=1, padding=2, bias=True)
         )
+
+    # 来自bonito的DNA R9.4.1 卷积层
+
+    # 假设输入的 5 个采样点信号是：[10, 11, 12, 11, 10]（一个小波峰）。通道 1（均值特征）：它的 5 个权重可能是 [0.2, 0.2, 0.2, 0.2, 0.2]。计算：$10\times0.2 + 11\times0.2 + 12\times0.2 + 11\times0.2 + 10\times0.2 = 10.8$。这个通道输出的是：这 5 个点的平均高度。通道 2（斜率/差分特征）：它的 5 个权重可能是 [-0.5, -0.5, 0, 0.5, 0.5]。计算：$10\times(-0.5) + 11\times(-0.5) + 12\times0 + 11\times0.5 + 10\times0.5 = 0$。这个通道输出的是：信号的变化趋势（这里是 0，说明两头对称，没有明显的上升或下降）。通道 3（突变特征）：它的 5 个权重可能是 [-1, 1, 0, 0, 0]。计算：$10\times(-1) + 11\times1 = 1$。这个通道输出的是：相邻点之间的差值。通道 4（二阶导数/弯曲度）：它的 5 个权重可能是 [-1, 2, -2, 2, -1]。这个通道输出的是：信号弯曲的剧烈程度。
+    # Nanopore 电流信号是 1D 连续信号。在一个只有 5 个采样点 的极小窗口内，信号能玩出的“花样”在物理上是非常有限的。
+    # 均值（电平高度）：代表当前的碱基。
+    # 斜率（上升/下降）：代表碱基转换。
+    # 曲率（波峰/波谷）：代表信号的剧烈程度。
+    # 局部能量/方差：代表噪声水平。
+    def _build_cnn_type13(self) -> None:
+        """构建 cnn_type=4 的 encoder：1 → 8 → 16 → 32（严格对称）
+        Modified: First layer has the first channel as local mean.
+        """
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 4, 第一个通道(kernel_size=5区域内的均值)，其余7个通道来自标准卷积
+            # Conv1dWithMeanChannel(out_channels=4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.Conv1d(1, 4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(4),
+            nn.SiLU(),
+
+            # Layer 2: 4 → 16
+            nn.Conv1d(4, 16, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+
+            # Layer 3: 16 → 768, stride=5, RF=33
+            nn.Conv1d(16, 768, kernel_size=19, stride=5, padding=9, bias=False),
+            nn.BatchNorm1d(768),
+        )
+        """构建 cnn_type=1 的 decoder（严格对称：16 → 8 → 4 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 768 → 16
+            nn.ConvTranspose1d(
+                in_channels=768,
+                out_channels=16,
+                kernel_size=19,
+                stride=5,
+                padding=9,
+                output_padding=1,
+                bias=False,
+            ),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 16 → 4
+            nn.Conv1d(16, 4, kernel_size=5, padding=2, bias=False),
+            nn.BatchNorm1d(4),
+            nn.SiLU(),
+            
+            # Inverse of encoder Layer 1: 4 → 1
+            nn.Conv1d(4, 1, kernel_size=5, padding=2, bias=True)
+        )
+    # 基于bonito的DNA R9.4.1 卷积层修改
+    # 
+    def _build_cnn_type14(self) -> None:
+        """构建 cnn_type=14 的 encoder：1 → 4 → 16 → 1024（严格对称）
+        Modified: First layer has the first channel as local mean.
+        """
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 4, 第一个通道(kernel_size=5区域内的均值)，其余7个通道来自标准卷积
+            # Conv1dWithMeanChannel(out_channels=4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.Conv1d(1, 4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(4),
+            nn.SiLU(),
+
+            # Layer 2: 4 → 16
+            nn.Conv1d(4, 16, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+
+            # Layer 3: 16 → 1024, stride=5, RF=33
+            nn.Conv1d(16, 1024, kernel_size=19, stride=5, padding=9, bias=False),
+            nn.BatchNorm1d(1024),
+        )
+        """构建 cnn_type=1 的 decoder（严格对称：16 → 8 → 4 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 1024 → 16
+            nn.ConvTranspose1d(
+                in_channels=1024,
+                out_channels=16,
+                kernel_size=19,
+                stride=5,
+                padding=9,
+                output_padding=1,
+                bias=False,
+            ),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 16 → 4
+            nn.Conv1d(16, 4, kernel_size=5, padding=2, bias=False),
+            nn.BatchNorm1d(4),
+            nn.SiLU(),
+            
+            # Inverse of encoder Layer 1: 4 → 1
+            nn.Conv1d(4, 1, kernel_size=5, padding=2, bias=True)
+        )
+
+    # 基于bonito的DNA R9.4.1 卷积层修改
+    # 
+    def _build_cnn_type15(self) -> None:
+        """构建 cnn_type=14 的 encoder：1 → 4 → 16 → 1024（严格对称）
+        Modified: First layer has the first channel as local mean.
+        """
+        self.encoder = nn.Sequential(
+            # Layer 1: 1 → 4, 第一个通道(kernel_size=5区域内的均值)，其余7个通道来自标准卷积
+            # Conv1dWithMeanChannel(out_channels=4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.Conv1d(1, 4, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(4),
+            nn.SiLU(),
+
+            # Layer 2: 4 → 16
+            nn.Conv1d(4, 16, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+
+            # Layer 3: 16 → 1024, stride=5, RF=33
+            nn.Conv1d(16, 512, kernel_size=19, stride=5, padding=9, bias=False),
+            nn.BatchNorm1d(512),
+        )
+        """构建 cnn_type=1 的 decoder（严格对称：16 → 8 → 4 → 1）"""
+        self.decoder = nn.Sequential(
+            # Inverse of encoder Layer 3: 1024 → 16
+            nn.ConvTranspose1d(
+                in_channels=512,
+                out_channels=16,
+                kernel_size=19,
+                stride=5,
+                padding=9,
+                output_padding=1,
+                bias=False,
+            ),
+            nn.BatchNorm1d(16),
+            nn.SiLU(),
+
+            # Inverse of encoder Layer 2: 16 → 4
+            nn.Conv1d(16, 4, kernel_size=5, padding=2, bias=False),
+            nn.BatchNorm1d(4),
+            nn.SiLU(),
+            
+            # Inverse of encoder Layer 1: 4 → 1
+            nn.Conv1d(4, 1, kernel_size=5, padding=2, bias=True)
+        )
+    def _build_cnn_type16(self) -> None:
+        """cnn_type=2_stride4: 总 stride=4 (1,1,2,2,1)"""
+        self.encoder = nn.Sequential(
+            # Layer 1: stride=1, 提取基础波形特征
+            Conv1dWithMeanChannel(out_channels=64, kernel_size=5, stride=1, padding=2, bias=False),
+            #nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+        
+            # Layer 2: stride=1, 进一步平滑
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+        
+            # Layer 3: stride=2, 第一次下采样
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+        
+            # Layer 4: stride=2, 第二次下采样
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+        
+            # Layer 5: stride=1, 高维特征融合 (512通道)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+        )
+        
+        """严格对称 decoder"""
+        self.decoder = nn.Sequential(
+            # L5 Inverse: 512 -> 128, stride 1
+            nn.Conv1d(512, 128, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+        
+            # L4 Inverse: 128 -> 128, upsample x2
+            nn.ConvTranspose1d(128, 128, kernel_size=9, stride=2, padding=4, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+        
+            # L3 Inverse: 128 -> 64, upsample x2
+            nn.ConvTranspose1d(128, 64, kernel_size=9, stride=2, padding=4, output_padding=1, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+        
+            # L2 Inverse: 64 -> 64
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+        
+            # L1 Inverse: 64 -> 1
+            nn.Conv1d(64, 1, kernel_size=5, stride=1, padding=2, bias=True)
+        )
+
+    def _build_cnn_type17(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 瓶颈层 (直接合并在这里) ---
+            # 512 -> 128 -> 4
+            nn.Conv1d(512, 128, kernel_size=1), 
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),          
+            nn.Conv1d(128, 4, kernel_size=1),
+            nn.Tanh() 
+        )
+
+        # ==========================================
+        # 2. Decoder (极简重建)
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # 直接上采样还原维度: 4 -> 128 (通道扩充)
+            # stride=4 是为了抵消 Encoder 中两次 stride=2 的下采样
+            # 简单来说，这就像是**“缩放比例”的对齐**。如果 Encoder 把信号缩小了 4 倍，Decoder 就必须把它放大 4 倍，否则重建出来的波形长度就对不上了。在你的代码中，这个“步长（Stride）”的配合逻辑如下：1. Encoder 的“压缩”过程 (步长相乘)Encoder 中有两层改变了信号的时间长度：Layer 3: stride=2（长度变为原来的 $1/2$）Layer 4: stride=2（长度再变为原来的 $1/2$）总步长 (Total Stride): $2 \times 2 = 4$这意味着，如果你输入一个长度为 100 的电流信号，经过 Encoder 后，z_bottleneck 的时间维度长度就变成了 25。2. Decoder 的“还原”过程 (步长对应)为了让 x_recon（重建信号）变回原始的 100，你的 Decoder 必须把这 25 个点拉伸回 100 个点。你在 ConvTranspose1d 中设置了 stride=4。数学逻辑：$25 \times 4 = 100$。这就是所谓的**“配合”**：Encoder 下采样的总倍数 = Decoder 上采样的总倍数。
+            nn.ConvTranspose1d(4, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.SiLU(),
+            
+            # 还原回单通道信号
+            nn.Conv1d(128, 1, kernel_size=7, stride=1, padding=3, bias=True)
+        )
+
+
+    def _build_cnn_type18(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 瓶颈层 (直接合并在这里) ---
+            # 512 -> 128 -> 4
+            nn.Conv1d(512, 128, kernel_size=1), 
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),          
+            nn.Conv1d(128, 4, kernel_size=1),
+            nn.Tanh() 
+        )
+
+        # ==========================================
+        # 2. Decoder: 适度增强，拒绝“阶梯波形”
+        # 既然你准备使用 FSQ (Finite Scalar Quantization)，我们需要在 Decoder 的“还原能力”和“偷懒嫌疑”之间找一个黄金平衡点。
+        # 为了确保 Encoder 必须努力把碱基特征挤进那 4 个维度，而 Decoder 又能把离散的信号还原得平滑，我建议采用一个**“非对称但深层”**的架构。
+        # 为什么这样设计不会让 Encoder 偷懒？
+        # 1. 瓶颈维度依然是 4：无论 Decoder 多强，它能从 Encoder 拿到的“生料”只有 4 个维度。这就像是用一个极细的吸管传水，Encoder 必须把水的密度（信息密度）提得极高，Decoder 才能接得住。
+        # 2. 局部感受野限制：我在 Decoder 中使用了较小的 kernel_size=5 和 kernel_size=3。这意味着 Decoder 只能看到局部的波形逻辑，它没有全局视野去“猜”整段碱基。它必须严格依赖 Encoder 提供的 Token 来还原当前的波形细节。
+        # :3. 消除量化伪影：FSQ 之后，信号是断层式的格点。如果没有 Step B 和 Step C 的平滑，你的重建波形会像 Minecraft 里的方块一样。增加这两层是为了提高重建精度，而不是为了替代特征提取。
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # Step A: 扩张 + 初步上采样 (4 -> 128)
+            # 使用 stride=4 的转置卷积恢复时间维度
+            nn.ConvTranspose1d(4, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Step B: 局部平滑层 (Stride=1) -> 核心改进点
+            # 这一层的作用是消除 FSQ 量化带来的“硬边界”，把离散感磨平
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Step C: 特征细化 (Stride=1)
+            # 进一步过滤转置卷积可能产生的棋盘效应
+            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Step D: 最终还原回单通道电流信号
+            nn.Conv1d(32, 1, kernel_size=1, bias=True)
+        )
+    
+    def _build_cnn_type19(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 瓶颈层 (直接合并在这里) ---
+            # 512 -> 128 -> 4
+            nn.Conv1d(512, 128, kernel_size=1), 
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),          
+            nn.Conv1d(128, 8, kernel_size=1),
+            # 。如果你将 FSQ 替换为普通的 VQ（如标准的 Vector Quantization 或 Residual VQ），那么 encoder 最后是否使用 nn.Tanh() 需要重新评估——通常建议 移除 Tanh，或至少不强制限制在 [-1, 1]。对于普通 VQ（非 FSQ），encoder 的输出 不应 使用 nn.Tanh()。原因：VQ 的码本（codebook）是可学习的参数，其值域会通过训练自动适应 encoder 输出的分布。如果强行用 Tanh 将 latent 压缩到 [-1, 1]，反而会：
+            #nn.Tanh() 
+        )
+
+        # ==========================================
+        # 2. Decoder: 适度增强，拒绝“阶梯波形”
+        # 既然你准备使用 FSQ (Finite Scalar Quantization)，我们需要在 Decoder 的“还原能力”和“偷懒嫌疑”之间找一个黄金平衡点。
+        # 为了确保 Encoder 必须努力把碱基特征挤进那 4 个维度，而 Decoder 又能把离散的信号还原得平滑，我建议采用一个**“非对称但深层”**的架构。
+        # 为什么这样设计不会让 Encoder 偷懒？
+        # 1. 瓶颈维度依然是 4：无论 Decoder 多强，它能从 Encoder 拿到的“生料”只有 4 个维度。这就像是用一个极细的吸管传水，Encoder 必须把水的密度（信息密度）提得极高，Decoder 才能接得住。
+        # 2. 局部感受野限制：我在 Decoder 中使用了较小的 kernel_size=5 和 kernel_size=3。这意味着 Decoder 只能看到局部的波形逻辑，它没有全局视野去“猜”整段碱基。它必须严格依赖 Encoder 提供的 Token 来还原当前的波形细节。
+        # :3. 消除量化伪影：FSQ 之后，信号是断层式的格点。如果没有 Step B 和 Step C 的平滑，你的重建波形会像 Minecraft 里的方块一样。增加这两层是为了提高重建精度，而不是为了替代特征提取。
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # Step A: 扩张 + 初步上采样 (4 -> 128)
+            # 使用 stride=8 的转置卷积恢复时间维度
+            nn.ConvTranspose1d(8, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Step B: 局部平滑层 (Stride=1) -> 核心改进点
+            # 这一层的作用是消除 FSQ 量化带来的“硬边界”，把离散感磨平
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Step C: 特征细化 (Stride=1)
+            # 进一步过滤转置卷积可能产生的棋盘效应
+            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Step D: 最终还原回单通道电流信号
+            nn.Conv1d(32, 1, kernel_size=1, bias=True)
+        )
+
+    def _build_cnn_type20(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 瓶颈层 (直接合并在这里) ---
+            # 512 -> 128 -> 4
+            nn.Conv1d(512, 128, kernel_size=1), 
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),          
+            nn.Conv1d(128, 16, kernel_size=1),
+            # 。如果你将 FSQ 替换为普通的 VQ（如标准的 Vector Quantization 或 Residual VQ），那么 encoder 最后是否使用 nn.Tanh() 需要重新评估——通常建议 移除 Tanh，或至少不强制限制在 [-1, 1]。对于普通 VQ（非 FSQ），encoder 的输出 不应 使用 nn.Tanh()。原因：VQ 的码本（codebook）是可学习的参数，其值域会通过训练自动适应 encoder 输出的分布。如果强行用 Tanh 将 latent 压缩到 [-1, 1]，反而会：
+            #nn.Tanh() 
+        )
+
+        # ==========================================
+        # 2. Decoder: 适度增强，拒绝“阶梯波形”
+        # 既然你准备使用 FSQ (Finite Scalar Quantization)，我们需要在 Decoder 的“还原能力”和“偷懒嫌疑”之间找一个黄金平衡点。
+        # 为了确保 Encoder 必须努力把碱基特征挤进那 4 个维度，而 Decoder 又能把离散的信号还原得平滑，我建议采用一个**“非对称但深层”**的架构。
+        # 为什么这样设计不会让 Encoder 偷懒？
+        # 1. 瓶颈维度依然是 4：无论 Decoder 多强，它能从 Encoder 拿到的“生料”只有 4 个维度。这就像是用一个极细的吸管传水，Encoder 必须把水的密度（信息密度）提得极高，Decoder 才能接得住。
+        # 2. 局部感受野限制：我在 Decoder 中使用了较小的 kernel_size=5 和 kernel_size=3。这意味着 Decoder 只能看到局部的波形逻辑，它没有全局视野去“猜”整段碱基。它必须严格依赖 Encoder 提供的 Token 来还原当前的波形细节。
+        # :3. 消除量化伪影：FSQ 之后，信号是断层式的格点。如果没有 Step B 和 Step C 的平滑，你的重建波形会像 Minecraft 里的方块一样。增加这两层是为了提高重建精度，而不是为了替代特征提取。
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # Step A: 扩张 + 初步上采样 (4 -> 128)
+            # 使用 stride=8 的转置卷积恢复时间维度
+            nn.ConvTranspose1d(16, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Step B: 局部平滑层 (Stride=1) -> 核心改进点
+            # 这一层的作用是消除 FSQ 量化带来的“硬边界”，把离散感磨平
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Step C: 特征细化 (Stride=1)
+            # 进一步过滤转置卷积可能产生的棋盘效应
+            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Step D: 最终还原回单通道电流信号
+            nn.Conv1d(32, 1, kernel_size=1, bias=True)
+        )
+
+    def _build_cnn_type21(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 瓶颈层 (直接合并在这里) ---
+            # 512 -> 128 -> 4
+            nn.Conv1d(512, 128, kernel_size=1), 
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),          
+            nn.Conv1d(128, 4, kernel_size=1),
+            #nn.Tanh() 
+        )
+
+        # ==========================================
+        # 2. Decoder: 适度增强，拒绝“阶梯波形”
+        # 既然你准备使用 FSQ (Finite Scalar Quantization)，我们需要在 Decoder 的“还原能力”和“偷懒嫌疑”之间找一个黄金平衡点。
+        # 为了确保 Encoder 必须努力把碱基特征挤进那 4 个维度，而 Decoder 又能把离散的信号还原得平滑，我建议采用一个**“非对称但深层”**的架构。
+        # 为什么这样设计不会让 Encoder 偷懒？
+        # 1. 瓶颈维度依然是 4：无论 Decoder 多强，它能从 Encoder 拿到的“生料”只有 4 个维度。这就像是用一个极细的吸管传水，Encoder 必须把水的密度（信息密度）提得极高，Decoder 才能接得住。
+        # 2. 局部感受野限制：我在 Decoder 中使用了较小的 kernel_size=5 和 kernel_size=3。这意味着 Decoder 只能看到局部的波形逻辑，它没有全局视野去“猜”整段碱基。它必须严格依赖 Encoder 提供的 Token 来还原当前的波形细节。
+        # :3. 消除量化伪影：FSQ 之后，信号是断层式的格点。如果没有 Step B 和 Step C 的平滑，你的重建波形会像 Minecraft 里的方块一样。增加这两层是为了提高重建精度，而不是为了替代特征提取。
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # Step A: 扩张 + 初步上采样 (4 -> 128)
+            # 使用 stride=4 的转置卷积恢复时间维度
+            nn.ConvTranspose1d(4, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Step B: 局部平滑层 (Stride=1) -> 核心改进点
+            # 这一层的作用是消除 FSQ 量化带来的“硬边界”，把离散感磨平
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Step C: 特征细化 (Stride=1)
+            # 进一步过滤转置卷积可能产生的棋盘效应
+            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Step D: 最终还原回单通道电流信号
+            nn.Conv1d(32, 1, kernel_size=1, bias=True)
+        )
+     
+    def _build_cnn_type22(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 瓶颈层 (直接合并在这里) ---
+            # 512 -> 128 -> 4
+            nn.Conv1d(512, 128, kernel_size=1), 
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),          
+            nn.Conv1d(128, 3, kernel_size=1),
+            #nn.Tanh() 
+        )
+
+        # ==========================================
+        # 2. Decoder: 适度增强，拒绝“阶梯波形”
+        # 既然你准备使用 FSQ (Finite Scalar Quantization)，我们需要在 Decoder 的“还原能力”和“偷懒嫌疑”之间找一个黄金平衡点。
+        # 为了确保 Encoder 必须努力把碱基特征挤进那 4 个维度，而 Decoder 又能把离散的信号还原得平滑，我建议采用一个**“非对称但深层”**的架构。
+        # 为什么这样设计不会让 Encoder 偷懒？
+        # 1. 瓶颈维度依然是 4：无论 Decoder 多强，它能从 Encoder 拿到的“生料”只有 4 个维度。这就像是用一个极细的吸管传水，Encoder 必须把水的密度（信息密度）提得极高，Decoder 才能接得住。
+        # 2. 局部感受野限制：我在 Decoder 中使用了较小的 kernel_size=5 和 kernel_size=3。这意味着 Decoder 只能看到局部的波形逻辑，它没有全局视野去“猜”整段碱基。它必须严格依赖 Encoder 提供的 Token 来还原当前的波形细节。
+        # :3. 消除量化伪影：FSQ 之后，信号是断层式的格点。如果没有 Step B 和 Step C 的平滑，你的重建波形会像 Minecraft 里的方块一样。增加这两层是为了提高重建精度，而不是为了替代特征提取。
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # Step A: 扩张 + 初步上采样 (4 -> 128)
+            # 使用 stride=4 的转置卷积恢复时间维度
+            nn.ConvTranspose1d(3, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Step B: 局部平滑层 (Stride=1) -> 核心改进点
+            # 这一层的作用是消除 FSQ 量化带来的“硬边界”，把离散感磨平
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Step C: 特征细化 (Stride=1)
+            # 进一步过滤转置卷积可能产生的棋盘效应
+            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Step D: 最终还原回单通道电流信号
+            nn.Conv1d(32, 1, kernel_size=1, bias=True)
+        )
+     
+    def _build_cnn_type23(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 瓶颈层 (直接合并在这里) ---
+            # 512 -> 128 -> 4
+            nn.Conv1d(512, 128, kernel_size=1), 
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),          
+            nn.Conv1d(128, 2, kernel_size=1),
+            #nn.Tanh() 
+        )
+
+        # ==========================================
+        # 2. Decoder: 适度增强，拒绝“阶梯波形”
+        # 既然你准备使用 FSQ (Finite Scalar Quantization)，我们需要在 Decoder 的“还原能力”和“偷懒嫌疑”之间找一个黄金平衡点。
+        # 为了确保 Encoder 必须努力把碱基特征挤进那 4 个维度，而 Decoder 又能把离散的信号还原得平滑，我建议采用一个**“非对称但深层”**的架构。
+        # 为什么这样设计不会让 Encoder 偷懒？
+        # 1. 瓶颈维度依然是 4：无论 Decoder 多强，它能从 Encoder 拿到的“生料”只有 4 个维度。这就像是用一个极细的吸管传水，Encoder 必须把水的密度（信息密度）提得极高，Decoder 才能接得住。
+        # 2. 局部感受野限制：我在 Decoder 中使用了较小的 kernel_size=5 和 kernel_size=3。这意味着 Decoder 只能看到局部的波形逻辑，它没有全局视野去“猜”整段碱基。它必须严格依赖 Encoder 提供的 Token 来还原当前的波形细节。
+        # :3. 消除量化伪影：FSQ 之后，信号是断层式的格点。如果没有 Step B 和 Step C 的平滑，你的重建波形会像 Minecraft 里的方块一样。增加这两层是为了提高重建精度，而不是为了替代特征提取。
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # Step A: 扩张 + 初步上采样 (4 -> 128)
+            # 使用 stride=4 的转置卷积恢复时间维度
+            nn.ConvTranspose1d(2, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Step B: 局部平滑层 (Stride=1) -> 核心改进点
+            # 这一层的作用是消除 FSQ 量化带来的“硬边界”，把离散感磨平
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Step C: 特征细化 (Stride=1)
+            # 进一步过滤转置卷积可能产生的棋盘效应
+            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Step D: 最终还原回单通道电流信号
+            nn.Conv1d(32, 1, kernel_size=1, bias=True)
+        )
+
+    def _build_cnn_type24(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 瓶颈层 (直接合并在这里) ---
+            nn.GroupNorm(32, 512), # 安全阀，确保进入瓶颈层前数值受控
+            nn.Conv1d(512, 4, kernel_size=1, bias=True) # 纯线性投影
+        )
+
+        # ==========================================
+        # 2. Decoder: 适度增强，拒绝“阶梯波形”
+        # 既然你准备使用 FSQ (Finite Scalar Quantization)，我们需要在 Decoder 的“还原能力”和“偷懒嫌疑”之间找一个黄金平衡点。
+        # 为了确保 Encoder 必须努力把碱基特征挤进那 4 个维度，而 Decoder 又能把离散的信号还原得平滑，我建议采用一个**“非对称但深层”**的架构。
+        # 为什么这样设计不会让 Encoder 偷懒？
+        # 1. 瓶颈维度依然是 4：无论 Decoder 多强，它能从 Encoder 拿到的“生料”只有 4 个维度。这就像是用一个极细的吸管传水，Encoder 必须把水的密度（信息密度）提得极高，Decoder 才能接得住。
+        # 2. 局部感受野限制：我在 Decoder 中使用了较小的 kernel_size=5 和 kernel_size=3。这意味着 Decoder 只能看到局部的波形逻辑，它没有全局视野去“猜”整段碱基。它必须严格依赖 Encoder 提供的 Token 来还原当前的波形细节。
+        # :3. 消除量化伪影：FSQ 之后，信号是断层式的格点。如果没有 Step B 和 Step C 的平滑，你的重建波形会像 Minecraft 里的方块一样。增加这两层是为了提高重建精度，而不是为了替代特征提取。
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # Step A: 扩张 + 初步上采样 (4 -> 128)
+            # 使用 stride=4 的转置卷积恢复时间维度
+            nn.ConvTranspose1d(4, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Step B: 局部平滑层 (Stride=1) -> 核心改进点
+            # 这一层的作用是消除 FSQ 量化带来的“硬边界”，把离散感磨平
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Step C: 特征细化 (Stride=1)
+            # 进一步过滤转置卷积可能产生的棋盘效应
+            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Step D: 最终还原回单通道电流信号
+            nn.Conv1d(32, 1, kernel_size=1, bias=True)
+        )
+    def _build_cnn_type25(self) -> None:
+        # ==========================================
+        # 1. Encoder (包含瓶颈层)
+        # ==========================================
+        self.encoder = nn.Sequential(
+            # --- 骨干网络 ---
+            # Layer 1
+            nn.Conv1d(1, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 2
+            nn.Conv1d(64, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            # Layer 3 (Downsample x2)
+            nn.Conv1d(64, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 4 (Downsample x2)
+            nn.Conv1d(128, 128, kernel_size=9, stride=2, padding=4, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            # Layer 5 (High-dim fusion)
+            nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(512),
+            nn.SiLU(),
+
+            # --- 新瓶颈层: 512 -> 128 -> 128 -> 4 (两层 SiLU) ---
+            nn.Conv1d(512, 128, kernel_size=1, bias=False),  # 1x1 conv = linear per position
+            nn.SiLU(),
+            nn.Conv1d(128, 128, kernel_size=1, bias=False),
+            nn.SiLU(),
+            nn.Conv1d(128, 4, kernel_size=1, bias=True),     # 最后一层保留 bias（可选） 
+        )
+
+        # ==========================================
+        # 2. Decoder: 适度增强，拒绝“阶梯波形”
+        # 既然你准备使用 FSQ (Finite Scalar Quantization)，我们需要在 Decoder 的“还原能力”和“偷懒嫌疑”之间找一个黄金平衡点。
+        # 为了确保 Encoder 必须努力把碱基特征挤进那 4 个维度，而 Decoder 又能把离散的信号还原得平滑，我建议采用一个**“非对称但深层”**的架构。
+        # 为什么这样设计不会让 Encoder 偷懒？
+        # 1. 瓶颈维度依然是 4：无论 Decoder 多强，它能从 Encoder 拿到的“生料”只有 4 个维度。这就像是用一个极细的吸管传水，Encoder 必须把水的密度（信息密度）提得极高，Decoder 才能接得住。
+        # 2. 局部感受野限制：我在 Decoder 中使用了较小的 kernel_size=5 和 kernel_size=3。这意味着 Decoder 只能看到局部的波形逻辑，它没有全局视野去“猜”整段碱基。它必须严格依赖 Encoder 提供的 Token 来还原当前的波形细节。
+        # :3. 消除量化伪影：FSQ 之后，信号是断层式的格点。如果没有 Step B 和 Step C 的平滑，你的重建波形会像 Minecraft 里的方块一样。增加这两层是为了提高重建精度，而不是为了替代特征提取。
+        # ==========================================
+        self.decoder = nn.Sequential(
+            # Step A: 扩张 + 初步上采样 (4 -> 128)
+            # 使用 stride=4 的转置卷积恢复时间维度
+            nn.ConvTranspose1d(4, 128, kernel_size=9, stride=4, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+
+            # Step B: 局部平滑层 (Stride=1) -> 核心改进点
+            # 这一层的作用是消除 FSQ 量化带来的“硬边界”，把离散感磨平
+            nn.Conv1d(128, 64, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+
+            # Step C: 特征细化 (Stride=1)
+            # 进一步过滤转置卷积可能产生的棋盘效应
+            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+
+            # Step D: 最终还原回单通道电流信号
+            nn.Conv1d(32, 1, kernel_size=1, bias=True)
+        )
+
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

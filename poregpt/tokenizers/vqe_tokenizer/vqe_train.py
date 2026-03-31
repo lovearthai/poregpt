@@ -35,6 +35,18 @@ from .vqe_model_v7 import NanoporeVQEModel_V7
 from .vqe_model_v8 import NanoporeVQEModel_V8
 from .vqe_model_v9 import NanoporeVQEModel_V9
 from .vqe_model_v10 import NanoporeVQEModel_V10
+from .vqe_model_v11 import NanoporeVQEModel_V11
+from .vqe_model_v12 import NanoporeVQEModel_V12
+from .vqe_model_v13 import NanoporeVQEModel_V13
+from .vqe_model_v14 import NanoporeVQEModel_V14
+from .vqe_model_v15 import NanoporeVQEModel_V15
+from .vqe_model_v16 import NanoporeVQEModel_V16
+from .vqe_model_v17 import NanoporeVQEModel_V17
+from .vqe_model_v18 import NanoporeVQEModel_V18
+from .vqe_model_v19 import NanoporeVQEModel_V19
+from .vqe_model_v20 import NanoporeVQEModel_V20
+from .vqe_model_v21 import NanoporeVQEModel_V21
+from .vqe_model_v22 import NanoporeVQEModel_V22
 from accelerate import InitProcessGroupKwargs
 from datetime import timedelta
 
@@ -155,7 +167,7 @@ def save_full_checkpoint(
     global_step: int,
     cnn_type: int,
     model_type: int,
-    dynamic_commitment_weight: float,
+    prevq_act: str,
     accelerator: Accelerator
 ):
     """
@@ -174,7 +186,7 @@ def save_full_checkpoint(
             'global_step': global_step,
             'cnn_type': cnn_type,
             "model_type": model_type,
-            'dynamic_commitment_weight': dynamic_commitment_weight,
+            "prevq_act": prevq_act,
         }
         meta_path = os.path.join(path, "metadata.json")
         with open(meta_path, 'w') as f:
@@ -313,7 +325,13 @@ def vqe_train(
     batch_size: int = 16, # Note: This now refers to the device_micro_batch_size
     lr: float = 1e-4,
     num_epochs: int = 10,
+    prevq_act: str = "none",
+    fsq_levels: list = [0,0,0,0],
+    fsq_level_d: int = 5,
+    fsq_level_n: int = 4,
     codebook_size: int = 8192,
+    codebook_dim: int = 16,
+    codebook_nqtz: int = 2,
     codebook_decay: float = 0.99,
     codebook_emadc: int = 2,
     chunk_size: int = 12000,
@@ -386,7 +404,13 @@ def vqe_train(
         output_model_path=output_model_path,
         lr=lr,
         num_epochs=num_epochs,
+        prevq_act=prevq_act,
+        fsq_levels = fsq_levels,
+        fsq_level_d = fsq_level_d,
+        fsq_level_n = fsq_level_n,
         codebook_size=codebook_size,
+        codebook_dim=codebook_dim,
+        codebook_nqtz=codebook_nqtz,
         codebook_decay=codebook_decay,
         codebook_emadc=codebook_emadc,
         chunk_size=chunk_size,
@@ -454,10 +478,16 @@ def vqe_train(
         config={
                 "device_micro_batch_size": device_micro_batch_size, # Changed from 'batch_size'
                 "lr": lr,
+                "prevq_act":prevq_act,
                 "cnn_type":cnn_type,
                 "model_type":model_type,
                 "num_epochs": num_epochs,
+                "fsq_levels": fsq_levels,
+                "fsq_level_n": fsq_level_n,
+                "fsq_level_d": fsq_level_d,
                 "codebook_size": codebook_size,
+                "codebook_dim": codebook_dim,
+                "codebook_nqtz": codebook_nqtz,
                 "codebook_decay": codebook_decay,
                 "codebook_emadc": codebook_emadc,
                 "chunk_size": chunk_size,
@@ -553,12 +583,12 @@ def vqe_train(
 
         # --- 根据模型类型初始化分布式计数器 ---
         # 将token计数张量分配到加速器设备（GPU）上，以便在推理时直接操作
-        if model_type in [1, 2, 3,8]: # VQ1/2/3: 整体一个码本，视为第0层
+        if model_type in [1, 2, 3,8,15,16,21,22]: # VQ1/2/3: 整体一个码本，视为第0层
             token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_1 = None # 该模型类型无第二层
             token_counts_gpu_2 = None # <-- 新增
             token_counts_gpu_3 = None # <-- 新增
-        elif model_type in [4,5,6,10]: # RVQ: 明确为两层
+        elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]: # RVQ: 明确为两层
             #assert n_q == 2, f"For model_type 4, n_q must be 2, got {n_q}" # 确保模型配置正确
             token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
@@ -588,7 +618,7 @@ def vqe_train(
             for i, batch in enumerate(pbar):
                 x = batch # 获取输入数据
                 # --- 模型前向传播与Token计数统计 ---
-                if model_type in [1, 2, 3]: # 处理 VQ-VAE, EMA-VQ 模型
+                if model_type in [1, 2, 3,15,16]: # 处理 VQ-VAE, EMA-VQ 模型
                     recon, indices, _, loss_breakdown = model(x)
                     recon_loss = F.mse_loss(recon, x) # 计算重建损失
                     local_recon_loss += recon_loss.item()
@@ -598,17 +628,24 @@ def vqe_train(
                     flat_indices = indices.flatten()
                     # 使用scatter_add_原地更新计数张量，高效且内存友好
                     token_counts_gpu_0.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
-                if model_type in [8]: # 处理 VQ-VAE, EMA-VQ 模型
-                    recon, indices = model(x)
+                if model_type in [8,21,22]: # 处理 VQ-VAE, EMA-VQ 模型
+                    if model_type in [22]:
+                        recon, indices, aux_loss = model(x)
+                        local_comit_loss += aux_loss # 累加承诺损失
+                    else:
+                        recon, indices = model(x)
+                        local_comit_loss += 0 # 累加承诺损失
                     recon_loss = F.mse_loss(recon, x) # 计算重建损失
                     local_recon_loss += recon_loss.item()
-                    local_comit_loss += 0.0 # 累加承诺损失
                     # 将多维indices展平为一维，统计所有token
                     flat_indices = indices.flatten()
                     # 使用scatter_add_原地更新计数张量，高效且内存友好
                     token_counts_gpu_0.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
-                elif model_type in [4,5,6,10]: # 处理 Residual Vector Quantization (RVQ) 模型
-                    recon, indices, all_loss, all_codes = model(x)
+                elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]: # 处理 Residual Vector Quantization (RVQ) 模型
+                    if model_type in [11,12,13,14,17,18,19]:
+                        recon, indices, uni_indices = model(x)
+                    else:
+                        recon, indices, all_loss, all_codes = model(x)
                     recon_loss = F.mse_loss(recon, x)
                     local_recon_loss = recon_loss.item() # RVQ的损失结构可能不同，此处按需调整
                     local_comit_loss = 0.0 # RVQ的损失结构可能不同，此处置零
@@ -681,13 +718,13 @@ def vqe_train(
 
         # --- 分布式聚合 (All-Reduce) ---
         # 将所有GPU上计算的计数结果汇总到一起
-        if model_type in [1, 2, 3,8]:
+        if model_type in [1, 2, 3,8,15,16,21,22]:
             global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
             global_counts_0 = global_counts_tensor_0.cpu().numpy() # 转换回CPU numpy数组以便计算
             global_counts_1 = None
             global_counts_2 = None
             global_counts_3 = None
-        elif model_type in [4,5,6,10]:
+        elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]:
             global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
             global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
             global_counts_0 = global_counts_tensor_0.cpu().numpy()
@@ -948,7 +985,9 @@ def vqe_train(
         )
     elif model_type == 10:
         model = NanoporeVQEModel_V10(
+            fsq_levels=fsq_levels,
             codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
             codebook_decay=codebook_decay,
             codebook_emadc=codebook_emadc,
             commitment_weight=commitment_weight,
@@ -959,6 +998,141 @@ def vqe_train(
             cnn_checkpoint_path = cnn_checkpoint_path,
             freeze_cnn = freeze_cnn,
             learnable_codebook=learnable_codebook,
+            prevq_act = prevq_act
+        )
+    elif model_type == 11:
+        model = NanoporeVQEModel_V11(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+    elif model_type == 12:
+        model = NanoporeVQEModel_V12(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+    elif model_type == 13:
+        model = NanoporeVQEModel_V13(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+
+    elif model_type == 14:
+        model = NanoporeVQEModel_V14(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+    elif model_type == 15:
+        model = NanoporeVQEModel_V15(
+            codebook_size=codebook_size,
+            codebook_dim=codebook_dim,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook
+        )
+    elif model_type == 16:
+        model = NanoporeVQEModel_V16(
+            codebook_size=codebook_size,
+            codebook_dim=codebook_dim,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            commitment_weight=commitment_weight,
+            codebook_diversity_loss_weight=codebook_diversity_loss_weight,
+            orthogonal_reg_weight=orthogonal_reg_weight,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook
+        )
+    elif model_type == 17:
+        model = NanoporeVQEModel_V17(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+
+    elif model_type == 18:
+        model = NanoporeVQEModel_V18(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+
+    elif model_type == 19:
+        model = NanoporeVQEModel_V19(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+    elif model_type == 20:
+        model = NanoporeVQEModel_V20(
+            codebook_size=codebook_size,
+            codebook_dim=codebook_dim,
+            codebook_decay=codebook_decay,
+            codebook_emadc=codebook_emadc,
+            cnn_type=cnn_type,
+            init_codebook_path=init_codebook_path,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+            learnable_codebook=learnable_codebook,
+        )
+    elif model_type == 21:
+        model = NanoporeVQEModel_V21(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+    elif model_type == 22:
+        model = NanoporeVQEModel_V22(
+            codebook_size=codebook_size,
+            codebook_dim=codebook_dim,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
         )
     else:
         print("error model type. exit")
@@ -1053,7 +1227,7 @@ def vqe_train(
         metadata = load_checkpoint_metadata(checkpoint_path)
         if metadata:
             # 定义恢复训练所必需的元数据键
-            REQUIRED_METADATA_KEYS = {'epoch', 'spoch', 'global_step'}
+            REQUIRED_METADATA_KEYS = {'epoch', 'spoch', 'global_step',"model_type","cnn_type"}
             # 2. 检查 metadata 是否包含所有必需的键
             missing_keys = REQUIRED_METADATA_KEYS - metadata.keys()
             if not missing_keys:
@@ -1068,6 +1242,8 @@ def vqe_train(
                     start_global_step = metadata['global_step']
                     model_type = metadata['model_type']
                     dynamic_commitment_weight = metadata.get('dynamic_commitment_weight', commitment_weight)
+                    prevq_act = metadata.get('prevq_act', "none")
+                    self.prevq_act = prevq_act
                     if accelerator.is_main_process:
                         print(f"✅ Successfully resumed from epoch {start_epoch}, spoch {start_spoch}, global_step {start_global_step}")
                     # 3. 加载加速器状态 (模型, 优化器等)
@@ -1207,7 +1383,6 @@ def vqe_train(
     for epoch in range(start_epoch, num_epochs):
         # Set epoch for the sampler if applicable (handled by Accelerate)
         train_dataloader.sampler.set_epoch(epoch) if hasattr(train_dataloader.sampler, 'set_epoch') else None
-
         # Zero grad at the beginning of an epoch (or more precisely, before the first accumulation cycle)
         # Accelerate's optimizer handles the zero_grad call internally when needed,
         # but for explicit control and clarity, especially with manual accumulation, it's good practice.
@@ -1223,27 +1398,43 @@ def vqe_train(
                 # No need to manually move batch to device
                 x = batch
                 # Forward pass
-                if model_type in [1,2,3]:
+                if model_type in [1,2,3,15,16]:
                     recon, indices, break_loss, loss_breakdown = model(x)
                     recon_loss = F.mse_loss(recon, x)
                     comit_loss = loss_breakdown.commitment
                     diver_loss = loss_breakdown.codebook_diversity
                     ortho_loss = loss_breakdown.orthogonal_reg
+                    total_loss = recon_loss + comit_loss * dynamic_commitment_weight
                 elif model_type in [4,5,6,7,9,10]:
                     recon, indices, all_loss, all_codes = model(x)
                     recon_loss = F.mse_loss(recon, x)
                     comit_loss = torch.tensor(0.0)
                     diver_loss = torch.tensor(0.0)
                     ortho_loss = torch.tensor(0.0)
-                elif model_type in [8]:
+                    total_loss = recon_loss
+                elif model_type in [8,21]:
                     recon, indices = model(x)
                     recon_loss = F.mse_loss(recon, x)
                     comit_loss = torch.tensor(0.0)
                     diver_loss = torch.tensor(0.0)
                     ortho_loss = torch.tensor(0.0)
+                    total_loss = recon_loss
+                elif model_type in [11,12,13,14,17,18,19,20]:
+                    recon, indices, uni_indices = model(x)
+                    recon_loss = F.mse_loss(recon, x)
+                    comit_loss = torch.tensor(0.0)
+                    diver_loss = torch.tensor(0.0)
+                    ortho_loss = torch.tensor(0.0)
+                    total_loss = recon_loss
+                elif model_type in [22]:
+                    recon, indices, aux_loss = model(x)
+                    recon_loss = F.mse_loss(recon, x)
+                    comit_loss = aux_loss
+                    diver_loss = torch.tensor(0.0)
+                    ortho_loss = torch.tensor(0.0)
+                    total_loss = recon_loss
 
                 # 💡 ACTUAL LOSS: Fixed weights. DWA is NOT applied here.
-                total_loss = recon_loss + comit_loss * dynamic_commitment_weight
 
                 # Scale the loss by the number of accumulation steps for averaging
                 # Accelerate's backward function handles gradient scaling for mixed precision automatically
@@ -1462,7 +1653,7 @@ def vqe_train(
                         global_step=global_step,
                         cnn_type=cnn_type,
                         model_type=model_type,
-                        dynamic_commitment_weight=dynamic_commitment_weight,
+                        prevq_act=prevq_act,
                         accelerator=accelerator # Pass accelerator instance
                     )
                 # --- End of if accelerator.sync_gradients block ---
@@ -1483,6 +1674,8 @@ def vqe_train(
             spoch=spoch,
             global_step=global_step,
             cnn_type=cnn_type,
+            model_type=model_type,
+            prevq_act=prevq_act,
             accelerator=accelerator
         )
     # Clean up Accelerator resources
@@ -1511,7 +1704,13 @@ def main():
         output_model_path=config.get("output_model_path", "nanopore_vq_tokenizer.pth"),
         lr=config.get("lr", 3e-4),
         num_epochs=config.get("num_epochs", 10),
+        prevq_act=config.get("prevq_act", "none"),
+        fsq_levels = config.get("fsq_levels",[0,0,0,0]),
+        fsq_level_d=config.get("fsq_level_d", 5),
+        fsq_level_n=config.get("fsq_level_n", 4),
         codebook_size=config.get("codebook_size", 8192),
+        codebook_dim=config.get("codebook_dim", 16),
+        codebook_nqtz=config.get("codebook_nqtz", 2),
         codebook_decay=config.get("codebook_decay", 0.99),
         codebook_emadc=config.get("codebook_emadc", 2),
         chunk_size=config.get("chunk_size", 12000),

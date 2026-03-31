@@ -463,7 +463,7 @@ def cnn_train(
     # ==============================
     global_step = start_global_step
     total_steps = len(dataloader) * num_epochs
-
+    avg_recon_last_step = 0.0
     for epoch in range(start_epoch, num_epochs):
         epoch_start_time = time.time()
         sampler.set_epoch(epoch)  # 确保每个 epoch 打乱不同
@@ -492,15 +492,25 @@ def cnn_train(
 
             # 定期记录训练日志
             if (step + 1) % loss_log_interval == 0 or step == len(dataloader) - 1:
-                avg_recon = np.mean(recon_losses)
+                # 1. 计算当前进程在这个区间内的平均 Loss
+                local_avg_recon = np.mean(recon_losses)
                 recon_losses.clear()
+                # 2. 【关键修改】多卡同步：将 local_avg 变成 global_avg
+                # 创建一个张量，用于接收所有卡的平均值
+                global_avg_tensor = torch.tensor(local_avg_recon, device=device)
+                
+                # all_reduce 会将所有卡的值相加并取平均 (AVG)
+                # 此时，global_avg_tensor 在所有卡上都变成了同一个全局平均值
+                dist.all_reduce(global_avg_tensor, op=dist.ReduceOp.AVG)
+                current_global_loss = global_avg_tensor.item()
 
                 # 多卡同步平均损失
-                avg_tensor = torch.tensor(avg_recon, device=device)
-                dist.all_reduce(avg_tensor, op=dist.ReduceOp.AVG)
-                avg_recon = avg_tensor.item()
-
                 if rank == 0:
+                    # 计算差值：当前全局值 - 上次全局值
+                    # 如果是第一次记录，loss_diff 可能很大或无意义，可以在 wandb 里忽略或特殊处理
+                    avg_recon_gain = avg_recon_last_step - current_global_loss
+                    # 更新“上次全局值”，供下一次循环使用
+                    avg_recon_last_step = current_global_loss
                     current_lr = optimizer.param_groups[0]['lr']
                     log_and_save(
                         epoch=epoch,
@@ -509,14 +519,15 @@ def cnn_train(
                         total_steps=total_steps,
                         epoch_start_time=epoch_start_time,
                         epoch_total_steps=len(dataloader),
-                        avg_recon_loss=avg_recon,
+                        avg_recon_loss=current_global_loss,
                         lr=current_lr,
                         loss_csv_path=loss_csv_path,
                     )
 
                     if use_wandb:
                         wandb.log({
-                            "train/recon_loss": avg_recon,
+                            "train/recon_loss": current_global_loss,
+                            "train/recon_loss_gain": avg_recon_gain,
                             "learning_rate": current_lr,
                             "epoch": epoch + 1,
                         }, step=global_step)
