@@ -18,7 +18,8 @@ output_model_path: "models/porepgt_vqe_tokenizer"
 loss_csv_path: "train_loss.csv"
 # 从指定路径加载检查点以恢复训练 (可选，留空或设为 null 以从头开始)
 # 示例: "models_old/nanopore_signal_tokenizer.pth.spoch26000.pth"
-#checkpoint_path: "/mnt/si003067jezr/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step02_train_vqe_model/pass109_w64_c256k_cnn08_dcw0q_dna595g_lr2e5_lemon5_m2_initcnn_freeze40k/models/porepgt_vqe_tokenizer.step15000.pth"
+#checkpoint_path: "models/porepgt_vqe_tokenizer.step7000.pth"
+
 # 训练多少个 spoch 后保存一次模型检查点
 # Spoch 是指每 update_loss_weight_every 次迭代后的一个周期单位
 save_checkpoint_every_spoch: 1000
@@ -33,14 +34,14 @@ num_epochs: 100
 model_type: 12
   
 # 学习率
-lr: 4.0e-05
+lr: 2.0e-05
 # 全局批次大小 (Global Batch Size)，用于模拟更大的有效批次大小
 # 实际批次大小由 global_batch_size 和 device_micro_batch_size 以及 GPU 数量共同决定
 #global_batch_size: 32768
 
 # 2064=48x43: 当device_micro_batch_size是48时,把global_batch_size设置为2064
 # 2072=56*37
-global_batch_size: 8192
+global_batch_size: 32768
 # 每个设备上的微批次大小f (Micro Batch Size)，影响单次前向/反向传播的内存使用
 device_micro_batch_size: 512 
 
@@ -78,8 +79,6 @@ cnn_type: 12
 # 是否使码本嵌入向量可学习 (true: 可学习, false: 固定或仅通过 EMA 更新)
 learnable_codebook: false
 # 初始化码本的路径 (可选，用于预初始化码本，例如从 K-means 聚类结果)
-init_codebook_path: "/mnt/nas_syy/default/poregpt/shared/kmc_models_lemon_c64k_redo1/memap_train_clustered_10p_centroids_k65536.npy"
-init_codebook_path: ""
 # CNN 编码器的预训练模型路径 (可选，用于初始化编码器权重)
 cnn_checkpoint_path: "/mnt/nas_syy/default/poregpt/shared/cnn_models_lemon_type1/checkpoints/nanopore_signal_tokenizer.pth.epoch28.pth"
 cnn_checkpoint_path: "/mnt/si003067jezr/default/poregpt/poregpt/poregpt/workflows/vqe_workflow/step01_train_cnn_model/human_dna_595g_memap_lemon5/train_cnn7/models/nanopore_cnn7_lr1e5.epoch100.pth"
@@ -104,11 +103,11 @@ orthogonal_reg_weight: 0.0
 
 # === 数据加载 ===
 # 加载数据时使用的子进程数量
-num_workers: 120
+num_workers: 96
 # 验证集比例 (从训练集中划分，如果 evaluation_npy_dir 未设置)
 val_ratio: 1.0
 # DataLoader 的 prefetch_factor 参数，控制预取数据的批次数量
-prefetch_factor: 64
+prefetch_factor: 65536
 
 # === 评估 ===
 # 是否在训练过程中进行验证评估
@@ -126,7 +125,7 @@ warmup_start_factor: 0.01
 # 预热结束的学习率因子 (相对于初始 lr，通常为 1.0)
 warmup_end_factor: 1.0
 # 主调度器结束时的学习率因子 (相对于预热结束时的 lr)
-main_scheduler_end_factor: 0.2
+main_scheduler_end_factor: 0.4
 
 
 # === 动态权重调整 (DWA) 相关 (仅用于日志记录，不影响实际训练损失) ===
@@ -139,4 +138,4 @@ use_wandb: true
 # WandB 项目名称
 wandb_project: "train_vqe_dna04g"
 # 当前运行的实验名称
-wandb_name: "pass342_dna595g_scratch_11x4x2_cnn12_lr4e5_d512g8192_lc12000-mongoq30-m12-notanh"
+wandb_name: "pass342_dna595g_scratch_11x4x2_cnn12_lr2e5_d512g8192_lc12000-mongoq30-m12-notanh"

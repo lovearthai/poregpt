@@ -16,7 +16,7 @@ from .vqe_tokenizer import VQETokenizer
 import torch
 
 
-def process_npy_file(npy_file_path,  output_path, tokenizer,max_batch_size):
+def process_npy_file(npy_file_path,  output_path, tokenizer,max_batch_size,layer=0):
     """
     Process a single .npy file: load chunks, tokenize them in batches,
     and write results to a .jsonl.gz file.
@@ -76,20 +76,25 @@ def process_npy_file(npy_file_path,  output_path, tokenizer,max_batch_size):
 
             # Prepare input tensor for the model
             x = torch.from_numpy(batch_signal_np).float().unsqueeze(1).to(tokenizer.device) # Shape: (B, 1, L_chunk)
-
-            # Perform batched inference
+            # 2. 模型推理：送入模型，获取重构信号、层级索引等
             with torch.no_grad():
-                reconstructed_signals, level_tokens_tensor, loss, tokens_tensor = tokenizer.model(x) # tokens_tensor shape: (B, T_tokens) or (B, T_tokens, C)
+                # 模型输出: (reconstructed_signal, level_indices, other_outputs...)
+                # level_indices 的形状是 [批次大小(Batch_Size), 序列长度(N), 层数(K)]
+                recon, level_indices, _ = tokenizer.model(x)
 
-            # Move tokens to CPU and convert to numpy
-            tokens_np = tokens_tensor.cpu().numpy() # Shape: (B, T_tokens) or (B, T_tokens, C)
+            # 3. Tokenization: 使用模型的 tokenize_indices 方法将层级索引转换为单一的token ID序列
+            # 这里需要获取实际的模型实例（处理 DDP 包装的情况）
+            raw_model = tokenizer.model.module if hasattr(tokenizer.model, 'module') else tokenizer.model
+            
+            # 调用 tokenize_indices 将 level_indices 转换为 tokens
+            # 返回的 tokens_tensor 形状是 [批次大小(Batch_Size), 序列长度(N)]
+            # layer 参数控制使用多少层量化器
+            tokens_tensor = raw_model.tokenize_indices(level_indices, layer=layer)
 
-            # Ensure shape is (B, T_tokens) if it was (B, T_tokens, 1)
-            if tokens_np.ndim == 3 and tokens_np.shape[-1] == 1:
-                tokens_np = tokens_np.squeeze(-1) # Shape: (B, T_tokens)
-            elif tokens_np.ndim != 2:
-                 print(f"Warning: Unexpected token shape {tokens_np.shape} for batch starting at {i}. Skipping batch results.")
-                 continue # Skip this batch if shape is wrong
+            # 4. 结果处理：将张量移至CPU并转换为 numpy 数组
+            # 将整个批次的 tokens 张量转换为 numpy 数组
+            # tokens_np_batch 的形状是 [批次大小(Batch_Size), 序列长度(N)]
+            tokens_np = tokens_tensor.cpu().numpy().astype(np.int64)
 
             # Iterate through the batch results (each row corresponds to one input chunk)
             for j in range(tokens_np.shape[0]):

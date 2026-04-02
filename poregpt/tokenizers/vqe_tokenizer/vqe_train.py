@@ -578,6 +578,8 @@ def vqe_train(
         # --- 初始化累积变量 ---
         # 用于累加验证批次上的损失
         local_recon_loss = 0.0
+        local_recon_loss_first = 0.0  # 新增：第一层重建损失
+        local_erer_first = 0.0       # 新增：第一层能量残差比
         local_comit_loss = 0.0
         num_batches = 0
 
@@ -643,12 +645,26 @@ def vqe_train(
                     token_counts_gpu_0.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
                 elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]: # 处理 Residual Vector Quantization (RVQ) 模型
                     if model_type in [11,12,13,14,17,18,19]:
-                        recon, indices, uni_indices = model(x)
+                        recon, indices,_ = model(x)
                     else:
                         recon, indices, all_loss, all_codes = model(x)
+
                     recon_loss = F.mse_loss(recon, x)
                     local_recon_loss = recon_loss.item() # RVQ的损失结构可能不同，此处按需调整
                     local_comit_loss = 0.0 # RVQ的损失结构可能不同，此处置零
+                    if model_type in [12]:
+                        # 2. 调用第一层重建
+                        # 假设你的模型有这个方法，或者通过 indices 手动调用
+                        #recon_first = model.module.decode_indices(indices,0) 
+                        # 3. 计算第一层指标
+                        #loss_first = F.mse_loss(recon_first, x)
+                        #local_recon_loss_first += loss_first.item()
+                        local_recon_loss_first +=0
+                        # 4. 计算能量残差比 (ERER)
+                        # diff_norm / full_signal_norm
+                        #erer = torch.norm(recon - recon_first) / (torch.norm(recon) + 1e-8)
+                        #local_erer_first += erer.item()
+                        local_erer_first += 0
 
                     # indices的形状为 [Batch_Size, Time_Steps, Num_Quantizers]
                     B, T, n_quantizers = indices.shape
@@ -743,17 +759,27 @@ def vqe_train(
         else:
             # Should not reach here due to earlier check
             global_counts_0 = global_counts_1 = global_counts_2 = global_counts_3 = None
+        
         # 聚合验证损失
-        metrics = torch.tensor([local_recon_loss, local_comit_loss, float(num_batches)], device=accelerator.device)
-        gathered_metrics = accelerator.gather(metrics).view(-1, 3)
+        metrics = torch.tensor([
+            local_recon_loss, 
+            local_comit_loss,
+            local_recon_loss_first, # 新增
+            local_erer_first,       # 新增
+            float(num_batches)
+            ], device=accelerator.device
+        )
+        gathered_metrics = accelerator.gather(metrics).view(-1, 5)
 
         # --- 后期处理（仅在主进程执行） ---
         if accelerator.is_main_process:
             # 计算全局平均 Loss
-            total_batches_all = gathered_metrics[:, 2].sum()
+            total_batches_all = gathered_metrics[:, 4].sum()
             global_recon_loss = (gathered_metrics[:, 0].sum() / total_batches_all).item()
             global_comit_loss = (gathered_metrics[:, 1].sum() / total_batches_all).item()
-
+            # 新增指标计算
+            global_recon_loss_first = (gathered_metrics[:, 2].sum() / total_batches_all).item()
+            global_erer_first = (gathered_metrics[:, 3].sum() / total_batches_all).item()
             # --- 计算每一层的指标 ---
             # Layer 0 (对于 VQ1/2/3，这是唯一的层；对于 RVQ，这是第一层)
             total_tokens_0 = int(np.sum(global_counts_0))
@@ -829,7 +855,9 @@ def vqe_train(
                 kl_div_1, used_code_n_1, usage_ratio_1, total_tokens_1, top1_ratio_1, top3_ratio_1, top5_ratio_1, top7_ratio_1, top9_ratio_1, top10_ratio_1, entropy_val_1,
                 kl_div_2, used_code_n_2, usage_ratio_2, total_tokens_2, top1_ratio_2, top3_ratio_2, top5_ratio_2, top7_ratio_2, top9_ratio_2, top10_ratio_2, entropy_val_2,
                 kl_div_3, used_code_n_3, usage_ratio_3, total_tokens_3, top1_ratio_3, top3_ratio_3, top5_ratio_3, top7_ratio_3, top9_ratio_3, top10_ratio_3, entropy_val_3,
-                max_entropy, global_recon_loss, global_comit_loss
+                max_entropy, global_recon_loss, global_comit_loss,
+                global_recon_loss_first, # 位置 47
+                global_erer_first        # 位置 48
             )
         else: # 非主进程
             model.train()
@@ -1243,7 +1271,6 @@ def vqe_train(
                     model_type = metadata['model_type']
                     dynamic_commitment_weight = metadata.get('dynamic_commitment_weight', commitment_weight)
                     prevq_act = metadata.get('prevq_act', "none")
-                    self.prevq_act = prevq_act
                     if accelerator.is_main_process:
                         print(f"✅ Successfully resumed from epoch {start_epoch}, spoch {start_spoch}, global_step {start_global_step}")
                     # 3. 加载加速器状态 (模型, 优化器等)
@@ -1265,7 +1292,6 @@ def vqe_train(
     else:
         if accelerator.is_main_process:
             print("⚠️ No checkpoint path provided or path is not a directory. Starting from scratch.") 
-
 
 
 
@@ -1364,6 +1390,9 @@ def vqe_train(
     wandb_codebook_max_entropy = 0
     wandb_eval_recon_loss = 0
     wandb_eval_comit_loss = 0
+    wandb_eval_first_loss = 0
+    wandb_eval_erer_loss = 0
+
 
     if use_dynamic_commitment_weight:
         init_commitment_weight = commitment_weight
@@ -1503,6 +1532,7 @@ def vqe_train(
                         lr=current_lr,
                         accelerator=accelerator # Pass accelerator instance
                     )
+                    
                     # Prepare log dict for WandB
                     log_dict.update({
                         "train/recon_loss": g_recon,
@@ -1518,6 +1548,9 @@ def vqe_train(
                         "evaluate/total_tokens": wandb_total_tokens, # Placeholder
                         "evaluate/recon_loss": wandb_eval_recon_loss, # Placeholder
                         "evaluate/comit_loss": wandb_eval_comit_loss, # Placeholder
+                        "evaluate/first_loss": wandb_eval_first_loss, # Placeholder
+                        "evaluate/erer_loss": wandb_eval_erer_loss, # Placeholder
+
 
                         "codebook/kldiv": wandb_kldiv, # Placeholder
                         "codebook/usage": wandb_codebook_usage, # Placeholder
@@ -1625,7 +1658,9 @@ def vqe_train(
 
                                wandb_codebook_max_entropy,
                                wandb_eval_recon_loss,
-                               wandb_eval_comit_loss
+                               wandb_eval_comit_loss,
+                               wandb_eval_first_loss,
+                               wandb_eval_erer_loss
                                ) = result
                             print(f"Effective Step {global_step} - Codebook Usage: {wandb_codebook_usage:.2%} wandb_kldiv: {wandb_kldiv}")
                     except Exception as e:

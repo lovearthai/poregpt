@@ -73,7 +73,7 @@ class NanoporeVQEModel_V12(nn.Module):
         # 比如是 128
         cnn_output_dim = self.cnn_model.out_channels
         fsq_levels = [fsq_level_d] * fsq_level_n
-
+        self.fsq_levels = fsq_levels
         # 2. 核心检查逻辑：
         #    - isinstance(x, int): 确保是整数类型 (排除 4.0 这种 float)
         #    - x > 0: 确保是正数 (排除 0 和负数)
@@ -89,7 +89,6 @@ class NanoporeVQEModel_V12(nn.Module):
                 elif x <= 0:
                     print(f"❌ 索引 {i} 的值 {x} 不是正数")
             raise ValueError("fsq_levels 格式错误")
-            return
 
         assert fsq_codebook_size == codebook_size, f"码本大小不匹配！计算值: {fsq_codebook_size}, 预期值: {codebook_size}"
         # 实例化 ResidualFSQ
@@ -99,15 +98,15 @@ class NanoporeVQEModel_V12(nn.Module):
         self.project_in = nn.Linear(cnn_output_dim, fsq_level_n)
         self.project_out = nn.Linear(fsq_level_n, cnn_output_dim)
 
+        #  想支持 layer=1,2,... 多粒度 token/recon	训练时必须设 quantize_dropout=True
         # 实例化 ResidualFSQ
         # 注意：RFSQ 内部会自动根据 dim 和 levels 的长度处理投影 (project_in/out)
         self.vq = ResidualFSQ(
             levels = fsq_levels,
             num_quantizers = codebook_nqtz,
             dim = fsq_level_n,
-            quantize_dropout = False,
-            quantize_dropout_cutoff_index = 1, # 至少保留第一层量化
-            # 如果需要固定总码本大小，可以调整 levels
+            quantize_dropout=True,  # ← 启用
+            quantize_dropout_cutoff_index=1,  # 可选：至少保留前1层
         )
         print(f"self.vq.levels:{self.vq.levels}") 
 
@@ -249,11 +248,6 @@ class NanoporeVQEModel_V12(nn.Module):
         # 4. 应用 Residual FSQ
         # 注意这里传入的是 z_projected
         z_quantized_projected, level_indices = self.vq(z_projected)
-
-        # 5. 显式投影回原始维度
-        # 将量化后的维度 (例如 4) 映射回 CNN 解码器需要的维度 (例如 128)
-        z_quantized_permuted = self.project_out(z_quantized_projected) # [B, N, C]
-
         # 修复 ResidualFSQ 返回的 indices 类型为 int32 的问题，统一转为 int64
         # indices = indices.to(torch.int64) 是一个 类型转换 (type casting) 操作。PyTorch 中的 tensor.to() 方法，当用于类型转换时，其行为取决于原始张量是否需要被梯度追踪（即 requires_grad 属性）。
         # 对不需要梯度的张量（常见情况）：在向量量化（VQ）的场景下，indices 通常是量化过程产生的离散索引。
@@ -268,69 +262,9 @@ class NanoporeVQEModel_V12(nn.Module):
         level_indices = level_indices.to(torch.int64)
 
 
-        # 从 level_indices 的形状动态获取量化器数量
-        B, N, indices_n_quantizers = level_indices.shape # 例如 B=4, N=512, n_quantizers=4
-        # --- 新增代码：合并多层 indices 为单一的 uni_indices ---
-        # 获取每层的码本大小
-        levels = torch.tensor(self.vq.levels, dtype=torch.long, device=level_indices.device) # [L0, L1, L2, L3], e.g., [8192, 8192, 8192, 8192]
-
-        # 断言确保量化器数量与 levels 数量匹配
-        assert self.num_quantizers == indices_n_quantizers, f"Number of quantizers ({codebook_nqtz}) must match number of levels ({indices_n_quantizers})"
-
-
-        # 计算 FSQ 的总码本大小 (L0 * L1 * ... * LN)
-        fsq_size = torch.prod(levels).item() # e.g., 8192^4 或 8*5*5*5
-
-
-        # --- 合并策略：让骨干层 (idx[0]) 拥有最高权重 ---
-        # uni_token = idx[0] * fsq_size^(k-1) + idx[1] * fsq_size^(k-2) + ... + idx[k-1] * fsq_size^0
-        # 其中 k = indices_n_quantizers
-        # 直接计算权重: [fsq_size^(k-1), fsq_size^(k-2), ..., fsq_size^0]
-        # 对应索引:    [idx[0],       idx[1],       ..., idx[k-1]]
-        exponents = torch.arange(indices_n_quantizers - 1, -1, -1, dtype=torch.long, device=level_indices.device)
-        # exponents = [k-1, k-2, ..., 1, 0]
-
-        fsq_size_tensor = torch.tensor(fsq_size, dtype=torch.long, device=level_indices.device)
-        multipliers = torch.pow(fsq_size_tensor, exponents)
-        # multipliers = [fsq_size^(k-1), fsq_size^(k-2), ..., fsq_size^1, fsq_size^0]
-        
-        # 计算加权索引并求和
-        # Broadcasting: level_indices [B, N, indices_n_q] * multipliers [indices_n_q] -> [B, N, indices_n_q]
-        weighted_indices = level_indices * multipliers.view(1, 1, -1)
-        # Sum along the last dimension (quantizer dimension) -> [B, N]
-        uni_indices = torch.sum(weighted_indices, dim=-1) # [B, N]
-
-        # --- Debug: 验证映射逻辑 ---
-        # 为了简化，我们只验证第一个 batch 和第一个 time step (即 [0, 0, :])
-
-        # --- Debug: 验证映射逻辑 ---
-        if False and B > 0 and N > 0:
-            debug_batch_idx = 0
-            debug_time_idx = 0
-            single_level_indices = level_indices[debug_batch_idx, debug_time_idx, :] # [indices_n_quantizers]
-            single_uni_index = uni_indices[debug_batch_idx, debug_time_idx] # scalar
-
-            # 手动计算验证
-            manual_calculation = 0
-            calculation_str_parts = []
-            # exponents 是 [k-1, k-2, ..., 0]
-            for i in range(indices_n_quantizers):
-                idx_val = single_level_indices[i].item()
-                power_val = exponents[i].item() # This will be k-1, k-2, ..., 0
-                weight_val = fsq_size ** power_val
-                contrib = idx_val * weight_val
-                manual_calculation += contrib
-                calculation_str_parts.append(f"{idx_val} * {fsq_size}^{power_val}")
-            calculation_str = " + ".join(calculation_str_parts) + f" = {manual_calculation}"
-            
-            print(f"\n[DEBUG] Merging ResidualFSQ tokens (FSQ_SIZE={fsq_size}), backbone (idx[0]) has highest weight:")
-            print(f"  Raw Indices (from each block): {single_level_indices.tolist()}")
-            print(f"  Weights applied [highest->lowest]: {multipliers.tolist()}")
-            print(f"  Calculation: {calculation_str}")
-            print(f"  Final Uni Index: {single_uni_index.item()}")
-            print(f"  Match: {'✓' if manual_calculation == single_uni_index.item() else '✗ MISMATCH!'}")
-        # --- End Debug ---
-
+        # 5. 显式投影回原始维度
+        # 将量化后的维度 (例如 4) 映射回 CNN 解码器需要的维度 (例如 128)
+        z_quantized_permuted = self.project_out(z_quantized_projected) # [B, N, C]
 
         # z_quantized_permuted: [B, N, 256] (量化后的连续特征，用于 Decoder)
         # indices: [B, N] (离散的 Token ID，用于存储/下游任务)
@@ -365,4 +299,119 @@ class NanoporeVQEModel_V12(nn.Module):
             # F.pad 的参数是 (左填充, 右填充)，这里只在时间轴末尾填充
             recon = F.pad(recon, (0, target_len - current_len))
 
-        return recon, level_indices, uni_indices
+        return recon, level_indices, {}
+
+    #layer == 0 → 使用全部 K 层（原 decode_from_level_indices）
+    #layer == 1 → 仅第一层（原 decode_from_first_layer）
+    #layer == 2 → 前两层，依此类推 
+
+    def decode_indices(
+        self,
+        level_indices: torch.Tensor,
+        layer: int = 0
+    ) -> torch.Tensor:
+        """
+        从 level_indices 的前 `layer` 层重建原始信号。
+        
+        - layer == 0: 使用所有 K 层（默认）
+        - layer >= 1: 使用前 `layer` 层（必须 <= K）
+
+        Args:
+            level_indices (torch.Tensor): [B, N, K], dtype=torch.long or compatible
+            layer (int): number of quantizer layers to use. 0 = all.
+
+        Returns:
+            torch.Tensor: reconstructed signal, shape [B, 1, T_recon]
+        """
+        if level_indices.dim() != 3:
+            raise ValueError("level_indices must be a 3D tensor of shape [B, N, K]")
+        
+        B, N, K = level_indices.shape
+        full_levels = self.vq.levels  # e.g., (5, 5, 5, 4)
+
+        # Determine how many layers to use
+        if layer == 0:
+            use_layers = K
+        else:
+            use_layers = layer
+            if use_layers < 1:
+                raise ValueError("layer must be >= 1 or 0 (for all layers).")
+            if use_layers > K:
+                raise ValueError(f"Requested {use_layers} layers, but only {K} available.")
+
+        # Truncate to the first `use_layers` layers
+        selected_indices = level_indices[:, :, :use_layers].to(torch.long)  # [B, N, use_layers]
+
+        # Use ResidualFSQ's native method — it handles partial layers correctly!
+        z_quantized_projected = self.vq.get_output_from_indices(selected_indices)  # [B, N, fsq_dim]
+
+        # Project back to CNN latent dimension (e.g., 512)
+        z_quantized_permuted = self.project_out(z_quantized_projected)  # [B, N, C]
+        z_quantized = z_quantized_permuted.permute(0, 2, 1)  # [B, C, N]
+
+        # Decode with CNN decoder
+        recon = self.cnn_model.decode(z_quantized)  # [B, 1, T]
+
+        # Align length: expected T = N * cnn_stride
+        target_len = N * self.cnn_stride
+        current_len = recon.shape[-1]
+        if current_len > target_len:
+            recon = recon[..., :target_len]
+        elif current_len < target_len:
+            recon = F.pad(recon, (0, target_len - current_len))
+
+        return recon
+
+    def tokenize_indices(
+        self,
+        level_indices: torch.Tensor,
+        layer: int = 0  # 0 means all layers; 1 means first layer only; 2 means first two layers, etc.
+    ) -> torch.Tensor:  
+        """
+        将 level_indices 的前 `layer` 层转换为唯一的 token ID。
+        
+        - If layer == 0: use all K layers (default behavior).
+        - If layer >= 1: use the first `layer` layers (must be <= K).
+
+        Args:
+            level_indices (torch.Tensor): [B, N, K]
+            layer (int): number of layers to use. 0 = all.
+
+        Returns:
+            List[List[int]]: token ID sequences
+        """
+        if level_indices.dim() != 3:
+            raise ValueError("level_indices must be a 3D tensor of shape [B, N, K]")
+        
+        B, N, K = level_indices.shape
+        full_levels = self.vq.levels  # e.g., (5, 5, 5, 4)
+        
+        if layer == 0:
+            use_layers = K
+            use_levels = full_levels
+        else:
+            use_layers = layer
+            if use_layers > K:
+                raise ValueError(f"Requested {use_layers} layers, but only {K} available.")
+            if use_layers < 1:
+                raise ValueError("layer must be >= 1 or 0 (for all layers).")
+            use_levels = full_levels[:use_layers]
+
+        # Extract the relevant indices: [B, N, use_layers]
+        selected_indices = level_indices[:, :, :use_layers].to(torch.long)
+
+        # Compute local codebook size for these layers
+        local_codebook_size = math.prod(use_levels)
+
+        device = level_indices.device
+
+        # Construct multipliers: [local_codebook_size^(use_layers-1), ..., local_codebook_size^0]
+        exponents = torch.arange(use_layers - 1, -1, -1, device=device, dtype=torch.long)
+        local_size_tensor = torch.tensor(local_codebook_size, dtype=torch.long, device=device)
+        multipliers = torch.pow(local_size_tensor, exponents)  # [use_layers]
+
+        # Weighted sum over the selected layers
+        weighted = selected_indices * multipliers.view(1, 1, -1)
+        uni_indices = torch.sum(weighted, dim=-1)  # [B, N]
+
+        return uni_indices

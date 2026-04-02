@@ -33,14 +33,14 @@ num_epochs: 100
 model_type: 12
   
 # 学习率
-lr: 4.0e-05
+lr: 1.0e-05
 # 全局批次大小 (Global Batch Size)，用于模拟更大的有效批次大小
 # 实际批次大小由 global_batch_size 和 device_micro_batch_size 以及 GPU 数量共同决定
 #global_batch_size: 32768
 
 # 2064=48x43: 当device_micro_batch_size是48时,把global_batch_size设置为2064
 # 2072=56*37
-global_batch_size: 8192
+global_batch_size: 32768
 # 每个设备上的微批次大小f (Micro Batch Size)，影响单次前向/反向传播的内存使用
 device_micro_batch_size: 512 
 
@@ -104,11 +104,11 @@ orthogonal_reg_weight: 0.0
 
 # === 数据加载 ===
 # 加载数据时使用的子进程数量
-num_workers: 120
+num_workers: 96
 # 验证集比例 (从训练集中划分，如果 evaluation_npy_dir 未设置)
 val_ratio: 1.0
 # DataLoader 的 prefetch_factor 参数，控制预取数据的批次数量
-prefetch_factor: 64
+prefetch_factor: 65536
 
 # === 评估 ===
 # 是否在训练过程中进行验证评估
@@ -126,7 +126,7 @@ warmup_start_factor: 0.01
 # 预热结束的学习率因子 (相对于初始 lr，通常为 1.0)
 warmup_end_factor: 1.0
 # 主调度器结束时的学习率因子 (相对于预热结束时的 lr)
-main_scheduler_end_factor: 0.2
+main_scheduler_end_factor: 0.4
 
 
 # === 动态权重调整 (DWA) 相关 (仅用于日志记录，不影响实际训练损失) ===
@@ -139,4 +139,4 @@ use_wandb: true
 # WandB 项目名称
 wandb_project: "train_vqe_dna04g"
 # 当前运行的实验名称
-wandb_name: "pass341_dna595g_scratch_9x4x2_cnn12_lr4e5_d512g8192_lc12000-mongoq30-m12-notanh"
+wandb_name: "pass341_dna595g_scratch_9x4x2_cnn12_lr1e5_d512g032k_lc12000-mongoq30-m12-notanh"

@@ -15,7 +15,7 @@ eggs/
 .eggs/
 *.egg-info/
 *.egg
-
+*.out
 # ==============================
 # Virtual Environments
 # ==============================
