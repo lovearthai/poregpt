@@ -219,7 +219,7 @@ class NanoporeCNNModel(nn.Module):
     def __init__(self, cnn_type: Literal[0, 1, 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,25] = 1) -> None:
         super().__init__()
 
-        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24):
+        if cnn_type not in (0, 1, 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25):
             raise ValueError(f"`cnn_type` must be 0, 1 or 2,3,4,5 got {cnn_type}.")
 
         self.cnn_type: int = cnn_type
@@ -1737,9 +1737,7 @@ class NanoporeCNNModel(nn.Module):
             nn.Conv1d(128, 512, kernel_size=5, stride=1, padding=2, bias=False),
             nn.BatchNorm1d(512),
             nn.SiLU(),
-
             # --- 瓶颈层 (直接合并在这里) ---
-            nn.GroupNorm(32, 512), # 安全阀，确保进入瓶颈层前数值受控
             nn.Conv1d(512, 4, kernel_size=1, bias=True) # 纯线性投影
         )
 
@@ -1801,12 +1799,12 @@ class NanoporeCNNModel(nn.Module):
             nn.BatchNorm1d(512),
             nn.SiLU(),
 
-            # --- 新瓶颈层: 512 -> 128 -> 128 -> 4 (两层 SiLU) ---
-            nn.Conv1d(512, 128, kernel_size=1, bias=False),  # 1x1 conv = linear per position
+            # --- 新瓶颈层: 512 -> 64  -> 4 (一层 SiLU) ---
+            # 如果使用512->128->4 参数量会导致A40显存恰好放不下
+            # 从深度学习特征提取的角度来看，这两个带有中间层（瓶颈层）的方案，理论上都绝对优于直接的 512 -> 4 
+            nn.Conv1d(512, 64, kernel_size=1, bias=False),  # 1x1 conv = linear per position
             nn.SiLU(),
-            nn.Conv1d(128, 128, kernel_size=1, bias=False),
-            nn.SiLU(),
-            nn.Conv1d(128, 4, kernel_size=1, bias=True),     # 最后一层保留 bias（可选） 
+            nn.Conv1d(64, 4, kernel_size=1, bias=True),     # 最后一层保留 bias（可选） 
         )
 
         # ==========================================

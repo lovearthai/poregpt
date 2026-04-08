@@ -98,6 +98,7 @@ class NanoporeVQEModel_V13(nn.Module):
         
         #self.project_in = nn.Linear(cnn_output_dim, fsq_level_n)
         # 为什么 Tanh 对 FSQ 至关重要？防止梯度消失/爆炸：FSQ 的隐式码本是基于输入的 round 或 atanh 映射。如果输入值（z_projected）达到 $\pm 5$ 或更高，在反向传播时，经过 FSQ 内部的模拟操作可能会产生极小或不稳定的梯度。Tanh 提前将分布收拢。提高码本利用率：FSQ 将 $[-1, 1]$ 划分为多个 bin。如果输入数据分布太散，大部分点会落在最外层的 bin 中；如果分布太紧，则只利用中间的 bin。Tanh 配合 nn.Linear 的权重学习，能让模型更自然地学习如何将特征“平铺”在整个量化空间内。
+        # 后面证明这个逻辑是错的，因为FSQ内部有自己的tanh
         self.project_in = nn.Sequential(
             nn.Linear(cnn_output_dim, fsq_level_n),
             nn.Tanh() # 将特征值强制限制在 [-1, 1] 之间，完美契合 FSQ 的输入需求

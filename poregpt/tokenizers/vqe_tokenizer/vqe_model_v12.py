@@ -182,16 +182,15 @@ class NanoporeVQEModel_V12(nn.Module):
             # 冻结参数（如果需要）
             freeze_cnt = 0
             if freeze_cnn:
-                #print("🔒 冻结encoder和decoder参数")
-                print("🔒 冻结encoder参数")
+                print("🔒 冻结encoder和decoder参数")
                 for name, param in self.named_parameters():
                     #if name.startswith(('encoder.', 'decoder.')):
                     #if name.startswith(('encoder.')):
-                    if name.startswith(('cnn_model.encoder.')):      # <- 修改为新的前缀
+                    if name.startswith(('cnn_model.encoder.','cnn_model.decoder.')):      # <- 修改为新的前缀
                         freeze_cnt +=1
                         param.requires_grad = False
                         print(f"冻结参数:{name}")
-            print(f"✅ 冻结了 {freeze_cnt} 个encoder参数")
+            print(f"✅ 冻结了 {freeze_cnt} 个参数")
         except Exception as e:
             print(f"❌ 加载CNN权重失败: {e}")
 

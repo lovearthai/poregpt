@@ -9,665 +9,305 @@ import time
 from typing import Optional
 import yaml
 import argparse
-
+from datetime import timedelta
+# 引入 accelerate
+from accelerate import Accelerator
+from accelerate.utils import set_seed
 
 # 相对导入模块
 from .dataset import NanoporeSignalDataset
 from .cnn_model import NanoporeCNNModel
 
-
 # ======================================================================================
-# 辅助函数：打印训练配置
+# 辅助函数
 # ======================================================================================
-def print_training_args(**kwargs):
-    """以美观格式打印所有训练超参数"""
-    from pprint import pformat
-    print("\n" + "=" * 60)
-    print(" 🚀 Starting CNN Autoencoder Training with the following configuration:")
-    print("=" * 60)
-    print(pformat(kwargs, width=100, sort_dicts=False))
-    print("=" * 60 + "\n")
+import os
+import shutil
 
-
-# ======================================================================================
-# 辅助函数：保存完整训练状态（模型 + 优化器 + 随机状态等）
-# ======================================================================================
-def save_full_checkpoint(
-    path: str,
-    model,
-    optimizer,
-    scheduler,
-    epoch: int,
-    global_step: int,
-    rank: int
-):
-    """仅在 rank=0 时保存完整 checkpoint，避免多进程写冲突"""
-    if rank != 0:
-        return
-
-    checkpoint = {
-        'epoch': epoch,
-        'global_step': global_step,
-        'model_state_dict': model.module.state_dict(),  # DDP 包装后需 .module
-        'optimizer_state_dict': optimizer.state_dict(),
-        'rng_state': torch.get_rng_state(),
-        'cuda_rng_state': torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
-        'numpy_rng_state': np.random.get_state(),
-    }
-    if scheduler is not None:
-        checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+def save_accelerate_checkpoint(accelerator, output_dir, step, max_keep=100):
+    """
+    output_dir: 检查点根目录 (来自 config)
+    step: 当前 global_step
+    max_keep: 最多保留多少个最近的检查点
+    """
+    # 🚀 格式化 Step 为 8 位补 0: 例如 00000010
+    step_str = f"{step:08d}"
+    checkpoint_dir = os.path.join(output_dir, f"step-{step_str}")
     
-    torch.save(checkpoint, path)
-    print(f"✅ Full checkpoint saved to {path}")
+    # 确保父目录存在
+    if accelerator.is_main_process:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # 这里的 wait_for_everyone 确保所有卡都完成了计算再开始保存
+    accelerator.wait_for_everyone()
+    accelerator.save_state(checkpoint_dir)
+    
+    # 管理磁盘空间：只在主进程执行删除操作
+    if accelerator.is_main_process:
+        accelerator.print(f"✅ Checkpoint saved to {checkpoint_dir}")
+        # 获取所有已存在的 checkpoint 目录
+        checkpoints = [d for d in os.listdir(output_dir) if d.startswith("step-")]
+        # 补 0 后，直接按字母顺序排序就是按数字大小排序
+        checkpoints = sorted(checkpoints)
+        # 如果超过数量限制，删除最早的
+        if len(checkpoints) > max_keep:
+            for i in range(len(checkpoints) - max_keep):
+                old_checkpoint = os.path.join(output_dir, checkpoints[i])
+                shutil.rmtree(old_checkpoint)
+                accelerator.print(f"🗑️ Removed old checkpoint: {old_checkpoint}")
 
 
 # ======================================================================================
-# 辅助函数：记录训练日志并追加到 CSV
-# ======================================================================================
-def log_and_save(
-    epoch: int,
-    step: int,
-    total_epochs: int,
-    total_steps: int,
-    epoch_start_time: float,
-    epoch_total_steps: int,
-    avg_recon_loss: float,
-    lr: float,
-    loss_csv_path: str,
-):
-    """打印当前训练进度，并将损失和学习率追加到 CSV 文件"""
-    current_time = time.time()
-    elapsed_seconds = current_time - epoch_start_time
-    steps_done = step % epoch_total_steps or 1
-    avg_time_per_step = elapsed_seconds / steps_done
-    remaining_seconds = avg_time_per_step * max(0, epoch_total_steps - steps_done)
-
-    def format_hms(seconds: float) -> str:
-        seconds = int(seconds)
-        h = seconds // 3600
-        m = (seconds % 3600) // 60
-        s = seconds % 60
-        return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
-
-    elapsed_str = format_hms(elapsed_seconds)
-    remaining_str = format_hms(remaining_seconds)
-
-    epoch_width = len(str(total_epochs))
-    step_width = len(str(total_steps))
-
-    print(
-        f"[Epoch {epoch+1:>{epoch_width}}/{total_epochs} | "
-        f"Step {step:>{step_width}}/{total_steps} | "
-        f"{elapsed_str}<{remaining_str}] "
-        f"Recon Loss: {avg_recon_loss:>8.6f} | "
-        f"LR: {lr:>7.2e} |"
-    )
-
-    # 追加训练日志到 CSV
-    with open(loss_csv_path, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow([epoch + 1, step, avg_recon_loss, lr])
-
-
-# ======================================================================================
-# 辅助函数：在验证集上评估模型
-# ======================================================================================
-def validate(model, val_loader, device):
-    """
-    在验证集上评估模型，返回平均重建损失（MSE）
-    注意：此函数应在 model.eval() 模式下调用
-    """
-    model.eval()
-    val_losses = []
-    with torch.no_grad():
-        for batch in val_loader:
-            x = batch.to(device)  # [B, 1, T]
-            recon = model(x)
-            loss = F.mse_loss(recon, x)
-            val_losses.append(loss.item())
-    return np.mean(val_losses)
-
-
-# ======================================================================================
-# 主训练函数：支持多卡 DDP + 验证 + 日志 + 断点续训
+# 主训练函数
 # ======================================================================================
 def cnn_train(
     npy_dir: str,
     output_model_path: str,
-    batch_size: int = 16,
+    device_micro_batch_size: int = 16,
+    global_batch_size: int = 256,
     lr: float = 1e-4,
     num_epochs: int = 10,
-    chunk_size: int = 12000,
     num_workers: int = 8,
     prefetch_factor: int = 128,
-    val_ratio: float = 0.1,               # ← 关键：验证集采样比例（即使有独立 val 路径也生效）
-    val_dataset_path: Optional[str] = None,  # ← 可选：独立验证集目录
+    val_ratio: float = 0.1,
+    val_dataset_path: Optional[str] = None,
     do_evaluate: bool = True,
-    loss_log_interval: int = 10,
-    loss_csv_path: str = "cnn_train_loss.csv",
+    loss_log_interval: int = 1,
     use_wandb: bool = True,
     wandb_project: str = "nanopore_cnn",
-    wandb_name: str = "default_cnn_run",
+    wandb_name: str = "accelerate_cnn_run",
     lr_scheduler_type: str = "cosine",
     warmup_steps: int = 1000,
-    warmup_start_factor: float = 1e-6,
-    warmup_end_factor: float = 1.0,
-    main_scheduler_end_factor: float = 1e-5,
-    save_checkpoint_every_epoch: int = 1,
     checkpoint_path: Optional[str] = None,
     cnn_type: int = 1,
+    mixed_precision: str = "no", # "no", "fp16", "bf16"
 ):
-    """
-    使用 DDP 多卡训练 Nanopore 信号的 CNN 自编码器，并在每个 epoch 后进行验证。
-    
-    核心逻辑：
-      - 优先使用 val_dataset_path 作为验证数据源；
-      - **但无论来源，都只取其中 val_ratio 比例的数据用于验证**；
-      - 验证仅在 rank=0 执行，避免重复计算和 I/O 冲突；
-      - 训练和验证损失均记录到 CSV 和 WandB。
-    """
-    # 打印所有训练参数（仅主进程）
-    if torch.distributed.is_available():
-        print_training_args(
-            npy_dir=npy_dir,
-            output_model_path=output_model_path,
-            batch_size=batch_size,
-            lr=lr,
-            num_epochs=num_epochs,
-            chunk_size=chunk_size,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            val_ratio=val_ratio,
-            val_dataset_path=val_dataset_path,
-            do_evaluate=do_evaluate,
-            loss_csv_path=loss_csv_path,
-            use_wandb=use_wandb,
-            wandb_project=wandb_project,
-            wandb_name=wandb_name,
-            lr_scheduler_type=lr_scheduler_type,
-            warmup_steps=warmup_steps,
-            cnn_type=cnn_type,
-            save_checkpoint_every_epoch=save_checkpoint_every_epoch,
-        )
+    # 1. 初始化 Accelerator
+    world_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    gradient_accumulation_steps = global_batch_size // (device_micro_batch_size * world_size)
+    if gradient_accumulation_steps < 1:
+        gradient_accumulation_steps = 1
 
-    # ==============================
-    # 初始化分布式训练环境 (DDP)
-    # ==============================
-    import torch.distributed as dist
-    from torch.nn.parallel import DistributedDataParallel as DDP
-    from torch.utils.data.distributed import DistributedSampler
+    accelerator = Accelerator(
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        mixed_precision=mixed_precision, # 🚀 开启混合精度
+        log_with="wandb" if use_wandb else None,
+    )
 
-    dist.init_process_group(backend="nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    local_device_id = rank % torch.cuda.device_count()
-    torch.cuda.set_device(local_device_id)
-    device = f"cuda:{local_device_id}"
+    if accelerator.is_main_process:
+        # 直接确保实验根目录存在
+        os.makedirs(output_model_path, exist_ok=True)
+        print(f"📂 Created output directory: {output_model_path}")
 
-    # ==============================
-    # 初始化 WandB（仅 rank=0）
-    # ==============================
-    if rank == 0 and use_wandb:
-        import wandb
-        wandb.init(
-            project=wandb_project,
-            name=wandb_name,
+    if use_wandb:
+        accelerator.init_trackers(
+            project_name=wandb_project,
             config={
-                "batch_size": batch_size,
+                "device_micro_batch_size": device_micro_batch_size,
+                "global_batch_size": global_batch_size,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
                 "lr": lr,
                 "num_epochs": num_epochs,
-                "chunk_size": chunk_size,
                 "cnn_type": cnn_type,
-                "world_size": world_size,
-                "val_ratio": val_ratio,
-                "val_dataset_path": val_dataset_path,
-            }
+                "mixed_precision": mixed_precision,
+            },
+            init_kwargs={"wandb": {"name": wandb_name}}
         )
-    else:
-        wandb = None
 
-    # ==============================
-    # 初始化日志文件（仅 rank=0）
-    # ==============================
-    if rank == 0:
-        print(f"🚀 Using {world_size} GPUs.")
-        print(f"📂 Train Data: {npy_dir}")
-        if val_dataset_path:
-            print(f"🔍 External val dataset path provided: {val_dataset_path}")
-        else:
-            print("🔍 No external val dataset; will sample from train data.")
-        print(f"💾 Final model will be saved to: {output_model_path}")
+    set_seed(42)
 
-        # 创建 CSV 文件并写入表头
-        with open(loss_csv_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['epoch', 'step', 'recon_loss', 'lr'])
-
-    # ==============================
-    # 构建训练数据集 + DataLoader
-    # ==============================
-    dataset = NanoporeSignalDataset(shards_dir=npy_dir)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        sampler=sampler,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
-        pin_memory=True,
-        drop_last=True
-    )
-    # ==============================
-    # [DEBUG] 打印一个 batch 的输入数据统计信息（仅 rank=0）
-    # ==============================
-    if rank == 0:
-        print("\n🔍 [DEBUG] Inspecting first batch of training data...")
-        for batch in dataloader:
-            x_sample = batch[0]  # 取第一个样本: [1, T]
-            print(f"  Shape: {x_sample.shape}")
-            print(f"  Min: {x_sample.min().item():.4f}")
-            print(f"  Max: {x_sample.max().item():.4f}")
-            print(f"  Mean: {x_sample.mean().item():.4f}")
-            print(f"  Std: {x_sample.std().item():.4f}")
-            print(f"  First 20 values: {x_sample.flatten()[:20].cpu().numpy()}")
-            print(f"  Last 20 values: {x_sample.flatten()[-20:].cpu().numpy()}")
-            break  # 只看第一个 batch 的第一个样本
-    print("✅ Debug inspection done.\n")
-    # ==============================
-    # 构建验证数据集（仅 rank=0）
-    # ==============================
-    val_loader = None
-    if do_evaluate and rank == 0:
-        # Step 1: 确定验证数据来源
-        if val_dataset_path and os.path.isdir(val_dataset_path) and os.listdir(val_dataset_path):
-            full_val_dataset = NanoporeSignalDataset(shards_dir=val_dataset_path)
-            print(f"✅ Loaded external validation dataset ({len(full_val_dataset)} chunks).")
-        else:
-            full_val_dataset = NanoporeSignalDataset(shards_dir=npy_dir)
-            print(f"⚠️ No valid external val dataset. Using training data as fallback.")
-
-        # Step 2: 【关键逻辑】无论来源，都按 val_ratio 采样子集
-        actual_val_size = max(1, int(val_ratio * len(full_val_dataset)))
-        np.random.seed(42)  # 固定随机种子，确保实验可复现
-        indices = np.random.choice(len(full_val_dataset), size=actual_val_size, replace=False)
-        val_dataset = torch.utils.data.Subset(full_val_dataset, indices)
-
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,          # 验证时不打乱
-            num_workers=max(2, num_workers // 2),
-            pin_memory=True
-        )
-        print(f"📊 Validation set size after {val_ratio:.1%} sampling: {len(val_dataset)}")
-
-    # ==============================
-    # 构建模型、优化器、调度器
-    # ==============================
-    model = NanoporeCNNModel(cnn_type=cnn_type).to(device)
-    model = DDP(model, device_ids=[local_device_id])
-
+    # 2. 准备模型和优化器
+    model = NanoporeCNNModel(cnn_type=cnn_type)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    # 学习率调度器
-    total_training_steps = len(dataloader) * num_epochs
-    scheduler = None
-
-    if rank == 0 and lr_scheduler_type != "constant":
-        print(f"📈 LR Scheduler: {lr_scheduler_type}, warmup={warmup_steps}")
-
-    if lr_scheduler_type != "constant":
-        from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
-        warmup_scheduler = LinearLR(optimizer, start_factor=warmup_start_factor, end_factor=warmup_end_factor, total_iters=warmup_steps)
-        main_steps = max(1, total_training_steps - warmup_steps)
-
-        if lr_scheduler_type == "cosine":
-            main_scheduler = CosineAnnealingLR(optimizer, T_max=main_steps)
-        elif lr_scheduler_type == "linear":
-            rel_factor = max(1e-8, min(1.0, main_scheduler_end_factor / warmup_end_factor))
-            main_scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=rel_factor, total_iters=main_steps)
-        else:
-            raise ValueError(f"Unsupported scheduler: {lr_scheduler_type}")
-
-        scheduler = SequentialLR(optimizer, [warmup_scheduler, main_scheduler], milestones=[warmup_steps])
-
-    # ==============================
-    # 加载检查点（断点续训）
-    # ==============================
-    start_epoch = 0
-    start_global_step = 0
-    if checkpoint_path and rank == 0:
-        if os.path.isfile(checkpoint_path):
-            print(f"📥 Loading checkpoint: {checkpoint_path}")
-        else:
-            print(f"⚠️ Checkpoint not found. Training from scratch.")
-            checkpoint_path = None
-
-    # 广播加载标志到所有进程
-    load_flag = torch.tensor([1 if checkpoint_path else 0], dtype=torch.int32, device=device)
-    if rank == 0:
-        load_flag[0] = int(os.path.isfile(checkpoint_path)) if checkpoint_path else 0
-    dist.broadcast(load_flag, src=0)
-
-    if load_flag.item() == 1:
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        # 🔧 修复：智能处理DDP状态字典兼容性
-        model_state_dict = ckpt['model_state_dict']
-        # 获取当前模型（DDP包装后）期待的键名
-        expected_keys = set(model.state_dict().keys()) # <--- 修改点1: 直接获取 DDP 包装后模型的键
-        checkpoint_keys = set(model_state_dict.keys())
-        
-        # 如果检查点键名与当前模型不匹配，尝试修复
-        if checkpoint_keys != expected_keys:
-            # 检查是否只需要添加 'module.' 前缀
-            prefixed_keys = {'module.' + k for k in checkpoint_keys}
-            if prefixed_keys == expected_keys:
-                # 需要为所有键添加 'module.' 前缀
-                new_state_dict = {f'module.{k}': v for k, v in model_state_dict.items()}
-                model_state_dict = new_state_dict
-                print("🔄 Fixed checkpoint: added 'module.' prefix to all keys")
-            else:
-                # 检查是否只需要移除 'module.' 前缀
-                unprefixed_keys = {k.replace('module.', '') for k in checkpoint_keys if k.startswith('module.')}
-                if unprefixed_keys == expected_keys or unprefixed_keys == set(model.module.state_dict().keys()): # <--- 修改点2: 增加备选条件
-                    new_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
-                    model_state_dict = new_state_dict
-                    print("🔄 Fixed checkpoint: removed 'module.' prefix from all keys")
-    
-
-
-        model.load_state_dict(model_state_dict)
-        
-
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        if scheduler and 'scheduler_state_dict' in ckpt:
-            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-        
-
-        #if rank == 0:
-        #    torch.set_rng_state(ckpt['rng_state'])
-        #    if ckpt.get('cuda_rng_state') is not None:
-        #        torch.cuda.set_rng_state(ckpt['cuda_rng_state'])
-        #    np.random.set_state(ckpt['numpy_rng_state'])
-        #    start_epoch = ckpt.get('epoch', -1) + 1
-        #    start_global_step = ckpt.get('global_step', 0)
-        #    print(f"✅ Resuming from epoch {start_epoch}")
-
-        if rank == 0:
-            # 🔧 修复：安全地加载 RNG 状态
-            rng_state_to_load = ckpt.get('rng_state')
-            if rng_state_to_load is not None:
-                try:
-                    # 尝试加载 PyTorch 的 RNG 状态
-                    # 确保它是 torch.ByteTensor 类型
-                    if not isinstance(rng_state_to_load, torch.Tensor):
-                         print(f"⚠️ Warning: Loaded rng_state is not a tensor, skipping PyTorch RNG restore. Type: {type(rng_state_to_load)}")
-                    elif rng_state_to_load.dtype != torch.uint8: # torch.ByteTensor is torch.uint8
-                        print(f"⚠️ Warning: Loaded rng_state is not of dtype uint8, attempting conversion...")
-                        # 尝试转换，如果失败则跳过
-                        try:
-                            rng_state_to_load = rng_state_to_load.to(dtype=torch.uint8)
-                            torch.set_rng_state(rng_state_to_load)
-                            print("✅ PyTorch RNG state restored after conversion.")
-                        except Exception as e_convert:
-                             print(f"⚠️ Warning: Failed to convert rng_state, skipping PyTorch RNG restore. Error: {e_convert}")
-                    else:
-                        torch.set_rng_state(rng_state_to_load)
-                        print("✅ PyTorch RNG state restored.")
-                except Exception as e:
-                    print(f"⚠️ Warning: Failed to load PyTorch RNG state, continuing without it. Error: {e}")
-            else:
-                print("⚠️ Warning: 'rng_state' not found in checkpoint, using default RNG state.")
-
-
-            cuda_rng_state_to_load = ckpt.get('cuda_rng_state')
-            if cuda_rng_state_to_load is not None:
-                try:
-                    # 同样的检查适用于 CUDA RNG 状态
-                    if not isinstance(cuda_rng_state_to_load, torch.Tensor):
-                         print(f"⚠️ Warning: Loaded cuda_rng_state is not a tensor, skipping CUDA RNG restore. Type: {type(cuda_rng_state_to_load)}")
-                    elif cuda_rng_state_to_load.dtype != torch.uint8:
-                        print(f"⚠️ Warning: Loaded cuda_rng_state is not of dtype uint8, attempting conversion...")
-                        try:
-                            cuda_rng_state_to_load = cuda_rng_state_to_load.to(dtype=torch.uint8)
-                            torch.cuda.set_rng_state(cuda_rng_state_to_load)
-                            print("✅ CUDA RNG state restored after conversion.")
-                        except Exception as e_convert:
-                             print(f"⚠️ Warning: Failed to convert cuda_rng_state, skipping CUDA RNG restore. Error: {e_convert}")
-                    else:
-                        torch.cuda.set_rng_state(cuda_rng_state_to_load)
-                        print("✅ CUDA RNG state restored.")
-                except Exception as e:
-                     print(f"⚠️ Warning: Failed to load CUDA RNG state, continuing without it. Error: {e}")
-            else:
-                # print("CUDA RNG state not found in checkpoint, this is OK if CUDA was not used during saving.")
-                pass # 不打印，静默处理
-
-
-            np_rng_state_to_load = ckpt.get('numpy_rng_state')
-            if np_rng_state_to_load is not None:
-                try:
-                    np.random.set_state(np_rng_state_to_load)
-                    print("✅ NumPy RNG state restored.")
-                except Exception as e:
-                     print(f"⚠️ Warning: Failed to load NumPy RNG state, continuing without it. Error: {e}")
-            else:
-                 print("⚠️ Warning: 'numpy_rng_state' not found in checkpoint, using default NumPy RNG state.")
-
-            start_epoch = ckpt.get('epoch', -1) + 1
-            start_global_step = ckpt.get('global_step', 0)
-            print(f"✅ Resuming from epoch {start_epoch}")
-
-    # ==============================
-    # 主训练循环
-    # ==============================
-    global_step = start_global_step
-    total_steps = len(dataloader) * num_epochs
-    avg_recon_last_step = 0.0
-    for epoch in range(start_epoch, num_epochs):
-        epoch_start_time = time.time()
-        sampler.set_epoch(epoch)  # 确保每个 epoch 打乱不同
-        model.train()
-
-        recon_losses = []
-
-        for step, batch in enumerate(dataloader):
-            global_step += 1
-            x = batch.to(device)  # [B, 1, T]
-
-            # 前向 + 损失
-            recon = model(x)
-            loss = F.mse_loss(recon, x)
-
-            # 反向传播
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            # 更新学习率
-            if scheduler is not None:
-                scheduler.step()
-
-            recon_losses.append(loss.item())
-
-            # 定期记录训练日志
-            if (step + 1) % loss_log_interval == 0 or step == len(dataloader) - 1:
-                # 1. 计算当前进程在这个区间内的平均 Loss
-                local_avg_recon = np.mean(recon_losses)
-                recon_losses.clear()
-                # 2. 【关键修改】多卡同步：将 local_avg 变成 global_avg
-                # 创建一个张量，用于接收所有卡的平均值
-                global_avg_tensor = torch.tensor(local_avg_recon, device=device)
-                
-                # all_reduce 会将所有卡的值相加并取平均 (AVG)
-                # 此时，global_avg_tensor 在所有卡上都变成了同一个全局平均值
-                dist.all_reduce(global_avg_tensor, op=dist.ReduceOp.AVG)
-                current_global_loss = global_avg_tensor.item()
-
-                # 多卡同步平均损失
-                if rank == 0:
-                    # 计算差值：当前全局值 - 上次全局值
-                    # 如果是第一次记录，loss_diff 可能很大或无意义，可以在 wandb 里忽略或特殊处理
-                    avg_recon_gain = avg_recon_last_step - current_global_loss
-                    # 更新“上次全局值”，供下一次循环使用
-                    avg_recon_last_step = current_global_loss
-                    current_lr = optimizer.param_groups[0]['lr']
-                    log_and_save(
-                        epoch=epoch,
-                        step=global_step,
-                        total_epochs=num_epochs,
-                        total_steps=total_steps,
-                        epoch_start_time=epoch_start_time,
-                        epoch_total_steps=len(dataloader),
-                        avg_recon_loss=current_global_loss,
-                        lr=current_lr,
-                        loss_csv_path=loss_csv_path,
-                    )
-
-                    if use_wandb:
-                        wandb.log({
-                            "train/recon_loss": current_global_loss,
-                            "train/recon_loss_gain": avg_recon_gain,
-                            "learning_rate": current_lr,
-                            "epoch": epoch + 1,
-                        }, step=global_step)
-
-        # ==============================
-        # ✅ 每个 epoch 结束后执行验证
-        # ==============================
-        if do_evaluate and rank == 0 and val_loader is not None:
-            val_loss = validate(model.module, val_loader, device)  # 注意：用 .module 解包 DDP
-            current_lr = optimizer.param_groups[0]['lr']
-
-            # 打印验证结果
-            print(
-                f"[Epoch {epoch+1}/{num_epochs}] "
-                f"✅ Val Recon Loss: {val_loss:>8.6f} | "
-                f"LR: {current_lr:>7.2e}"
-            )
-
-            # 将验证结果写入 CSV（step 列用字符串 'validation' 标记）
-            with open(loss_csv_path, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([epoch + 1, 'validation', val_loss, current_lr])
-
-            # 记录到 WandB
-            if use_wandb:
-                wandb.log({
-                    "val/recon_loss": val_loss,
-                    "epoch": epoch + 1,
-                }, step=global_step)
-
-        # 所有进程等待 rank=0 完成验证（避免 race condition）
-        dist.barrier()
-
-        # 定期保存 checkpoint
-        if rank == 0 and (epoch + 1) % save_checkpoint_every_epoch == 0:
-            ckpt_path = f"{output_model_path}.epoch{epoch+1}.pth"
-            save_full_checkpoint(
-                path=ckpt_path,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch,
-                global_step=global_step,
-                rank=rank
-            )
-
-    # ==============================
-    # 保存最终模型
-    # ==============================
-    if rank == 0:
-        save_full_checkpoint(
-            path=output_model_path,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=num_epochs - 1,
-            global_step=global_step,
-            rank=rank
-        )
-        print(f"✅ Final model saved to {output_model_path}")
-        if use_wandb:
-            wandb.finish()
-
-    # 清理分布式环境
-    dist.barrier()
-    dist.destroy_process_group()
-def main():
-    # 定义一个简单的解析器，只用于获取 config 文件路径
-    parser = argparse.ArgumentParser(description="Train Nanopore Signal CNN using a YAML config file.")
-    parser.add_argument("--config", type=str, required=True, help="Path to the YAML config file.")
-    args, _ = parser.parse_known_args() # 解析已知参数（主要是 --config），忽略其他可能传入的参数
-
-    # 读取 YAML 配置文件
-    config_file_path = args.config # 使用命令行传入的路径
-    with open(config_file_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-
-    # 从配置字典中提取参数，并使用 get 设置默认值
-    # 从 data 部分提取
-    npy_dir = config.get('data', {}).get('npy_dir', '')
-    val_dataset_path = config.get('data', {}).get('val_dataset_path', None)
-
-    # 从 training 部分提取
-    output_model_path = config.get('training', {}).get('output_model_path', "demo_nanopore_vq_tokenizer.pth")
-    batch_size = config.get('training', {}).get('batch_size', 16)
-    lr = config.get('training', {}).get('lr', 3e-4)
-    num_epochs = config.get('training', {}).get('num_epochs', 10)
-    chunk_size = config.get('training', {}).get('chunk_size', 12000)
-    num_workers = config.get('training', {}).get('num_workers', 8)
-    val_ratio = config.get('training', {}).get('val_ratio', 0.1)
-    loss_csv_path = config.get('training', {}).get('loss_csv_path', "train_loss.csv")
-    loss_log_interval = config.get('training', {}).get('loss_log_interval', 10)
-    checkpoint_path = config.get('training', {}).get('checkpoint_path', "checkpoint_nanopore_vq_tokenizer.pth")
-    cnn_type = config.get('training', {}).get('cnn_type', 0)
-    prefetch_factor = config.get('training', {}).get('prefetch_factor', 512)
-
-    # 从 logging 部分提取
-    do_evaluate = config.get('logging', {}).get('do_evaluate', False) # 默认为 False，与 argparse 的 store_true 行为不同
-    use_wandb = config.get('logging', {}).get('use_wandb', True)
-    wandb_project = config.get('logging', {}).get('wandb_project', 'nanopore_cnn')
-    wandb_name = config.get('logging', {}).get('wandb_name', 'default_cnn_run')
-
-    # 从 scheduler 部分提取
-    lr_scheduler_type = config.get('scheduler', {}).get('lr_scheduler_type', 'cosine')
-    warmup_steps = config.get('scheduler', {}).get('warmup_steps', 1000)
-    warmup_start_factor = config.get('scheduler', {}).get('warmup_start_factor', 1e-6)
-    warmup_end_factor = config.get('scheduler', {}).get('warmup_end_factor', 1.0)
-    main_scheduler_end_factor = config.get('scheduler', {}).get('main_scheduler_end_factor', 1e-5)
-
-    # 从 checkpointing 部分提取
-    save_checkpoint_every_epoch = config.get('checkpointing', {}).get('save_checkpoint_every_epoch', 1)
-
-    # 调用 cnn_train 函数
-    cnn_train(
-        npy_dir=npy_dir,
-        output_model_path=output_model_path,
-        batch_size=batch_size,
-        lr=lr,
-        num_epochs=num_epochs,
-        chunk_size=chunk_size,
+    # 3. 准备数据集
+    dataset = NanoporeSignalDataset(shards_dir=npy_dir)
+    train_dataloader = DataLoader(
+        dataset,
+        batch_size=device_micro_batch_size,
+        shuffle=True,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
-        val_ratio=val_ratio,
-        val_dataset_path=val_dataset_path,
-        do_evaluate=do_evaluate,
-        loss_log_interval=loss_log_interval,
-        loss_csv_path=loss_csv_path,
-        use_wandb=use_wandb,
-        wandb_project=wandb_project,
-        wandb_name=wandb_name,
-        lr_scheduler_type=lr_scheduler_type,
-        warmup_steps=warmup_steps,
-        warmup_start_factor=warmup_start_factor,
-        warmup_end_factor=warmup_end_factor,
-        main_scheduler_end_factor=main_scheduler_end_factor,
-        save_checkpoint_every_epoch=save_checkpoint_every_epoch,
-        checkpoint_path=checkpoint_path,
-        cnn_type=cnn_type
+        pin_memory=True
+    )
+
+    val_loader = None
+    if do_evaluate:
+        val_source_dir = val_dataset_path if (val_dataset_path and os.path.isdir(val_dataset_path)) else npy_dir
+        full_val_dataset = NanoporeSignalDataset(shards_dir=val_source_dir)
+        actual_val_size = max(1, int(val_ratio * len(full_val_dataset)))
+        indices = np.random.choice(len(full_val_dataset), size=actual_val_size, replace=False)
+        val_dataset = torch.utils.data.Subset(full_val_dataset, indices)
+        val_loader = DataLoader(val_dataset, batch_size=device_micro_batch_size, shuffle=False, num_workers=4)
+
+    # 4. 学习率调度器
+    total_training_steps = (len(train_dataloader) // gradient_accumulation_steps) * num_epochs
+    if lr_scheduler_type == "cosine":
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(optimizer, T_max=total_training_steps)
+    else:
+        scheduler = None
+
+    # 5. 使用 Accelerate 准备所有对象
+    model, optimizer, train_dataloader, val_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, val_loader, scheduler
+    )
+
+    # ======================================================================================
+    # 🚀 新增：打印所有训练参数
+    # ======================================================================================
+    if accelerator.is_main_process:
+        print("\n" + "="*60)
+        print(" 🚀 Nanopore CNN Training Configuration")
+        print("="*60)
+        config_summary = {
+            "CNN Type": f"v{cnn_type}",
+            "NPY Directory": npy_dir,
+            "Mixed Precision": accelerator.mixed_precision,
+            "Device Micro-Batch": device_micro_batch_size,
+            "Global Batch Size": global_batch_size,
+            "Grad Accum Steps": gradient_accumulation_steps,
+            "World Size (GPUs)": accelerator.num_processes,
+            "Learning Rate": lr,
+            "Epochs": num_epochs,
+            "LR Scheduler": lr_scheduler_type,
+            "Warmup Steps": warmup_steps,
+            "Output Path": output_model_path,
+        }
+        for k, v in config_summary.items():
+            print(f"  {k:.<30} {v}")
+        print("="*60 + "\n")
+
+    # 6. 加载检查点
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        accelerator.load_state(checkpoint_path)
+        accelerator.print(f"📥 Resumed from checkpoint: {checkpoint_path}")
+
+    # 7. 训练循环准备
+    global_step = 0
+    total_steps = (len(train_dataloader) // gradient_accumulation_steps) * num_epochs
+    start_time = time.time() # 🚀 记录开始时间
+    last_loss = None  # 🚀 用于记录上一次的 avg_loss
+    # 8. 训练循环
+    for epoch in range(num_epochs):
+        model.train()
+        for step, batch in enumerate(train_dataloader):
+            with accelerator.accumulate(model):
+                x = batch # [B, 1, T]
+                recon = model(x)
+                loss = F.mse_loss(recon, x)
+
+                accelerator.backward(loss)
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                optimizer.zero_grad()
+
+            if accelerator.sync_gradients:
+                global_step += 1
+                if global_step % loss_log_interval == 0:
+                    avg_loss = accelerator.gather_for_metrics(loss).mean().item()
+                    current_lr = optimizer.param_groups[0]['lr']
+                    
+                    # 🚀 计算 Loss Gain
+                    # 如果是第一次记录，gain 为 0；否则为 上次 - 当前
+                    loss_gain = (last_loss - avg_loss) if last_loss is not None else 0.0
+                    last_loss = avg_loss # 更新 last_loss 供下次使用
+                    # 🚀 计算时间逻辑
+                    elapsed_time = time.time() - start_time
+                    steps_per_sec = global_step / elapsed_time if elapsed_time > 0 else 0
+                    remaining_steps = total_steps - global_step
+                    eta_seconds = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
+                    
+                    # 格式化时间字符串 HH:MM:SS
+                    elapsed_str = str(timedelta(seconds=int(elapsed_time)))
+                    eta_str = str(timedelta(seconds=int(eta_seconds)))
+                    
+                    # 🚀 组合打印信息
+                    # 格式：[Epoch 1/10 | Step 10/1000 | 0:00:05<0:08:20] Loss: 0.1234 | Gain: 0.0012 | LR: 1.00e-04
+                    progress_msg = (
+                        f"[Epoch {epoch+1:3d}/{num_epochs} | "
+                        f"Step {global_step:6d}/{total_steps} | "
+                        f"{elapsed_str}<{eta_str}] "
+                        f"Loss: {avg_loss:.6f} | "
+                        f"Gain: {loss_gain:+.6f} | " # 使用 + 显示符号
+                        f"LR: {current_lr:.2e}"
+                    )
+                    accelerator.print(progress_msg)
+                    
+                    if accelerator.is_main_process:
+                        accelerator.log({"train/loss": avg_loss,"train/loss_gain": loss_gain, "lr": current_lr}, step=global_step)
+                    # 在训练循环中定期清理
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        # 8. 验证
+        if do_evaluate and val_loader is not None:
+            model.eval()
+            val_losses = []
+            with torch.no_grad():
+                for batch in val_loader:
+                    recon = model(batch)
+                    loss = F.mse_loss(recon, batch)
+                    # 🔧 修复：先gather再转为标量，避免tensor累积
+                    gathered_loss = accelerator.gather_for_metrics(loss)
+                    val_losses.append(gathered_loss.item())  # ✅ 只存储数值
+            val_loss = torch.cat(val_losses).mean().item()
+            accelerator.print(f"✅ Epoch {epoch+1} Val Loss: {val_loss:.6f}")
+            if accelerator.is_main_process:
+                accelerator.log({"val/loss": val_loss}, step=global_step)
+        # 9. 保存状态
+        accelerator.wait_for_everyone()
+        save_accelerate_checkpoint(accelerator, output_model_path, global_step)
+
+    # ---------------------------------------------------------
+    # 9. 训练结束：保存最终模型 (纯权重，用于推理)
+    # ---------------------------------------------------------
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        # 第一步：解包模型（去掉分布式外壳）
+        unwrapped_model = accelerator.unwrap_model(model)
+        # 第二步：定义最终权重保存的【文件名】
+        # 注意：由于 output_model_path 是目录，这里必须拼接文件名
+        final_weights_path = os.path.join(output_model_path, "final_model_weights.pth")
+        # 第三步：只保存 state_dict
+        torch.save(unwrapped_model.state_dict(), final_weights_path)
+        # 可选：也存一个最后的【完整状态】，方便以后想再多练几个 epoch
+        save_accelerate_checkpoint(accelerator, output_model_path, global_step)
+        print(f"🎉 Training Finished!")
+        print(f"💾 Inference Weights: {final_weights_path}")
+        print(f"📦 Full Training State: {os.path.join(output_model_path, f'step-{global_step:08d}')}")
+    accelerator.end_training()
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    args = parser.parse_args()
+
+    with open(args.config, 'r') as f:
+        config = yaml.safe_load(f)
+
+    train_cfg = config.get('training', {})
+
+    cnn_train(
+        npy_dir=config['data']['npy_dir'],
+        output_model_path=train_cfg.get('output_model_path', 'models'),
+        # 🚀 补全缺失的性能与路径参数
+        num_workers=train_cfg.get('num_workers', 8),
+        prefetch_factor=train_cfg.get('prefetch_factor', 128),
+        checkpoint_path=train_cfg.get('checkpoint_path', None),
+        lr_scheduler_type=train_cfg.get('lr_scheduler_type', 'cosine'),
+        device_micro_batch_size=train_cfg.get('device_micro_batch_size', 16),
+        global_batch_size=train_cfg.get('global_batch_size', 256),
+        loss_log_interval=train_cfg.get('loss_log_interval', 1),
+        lr=train_cfg.get('lr', 1e-4),
+        num_epochs=train_cfg.get('num_epochs', 10),
+        val_ratio=train_cfg.get('val_ratio', 0.1),
+        cnn_type=train_cfg.get('cnn_type', 1),
+        mixed_precision=train_cfg.get('mixed_precision', 'no'), # 🚀 从 YAML 读取
+        use_wandb=config.get('logging', {}).get('use_wandb', True),
+        wandb_project=config.get('logging', {}).get('wandb_project',"default_wandb_project"),
+        wandb_name=config.get('logging', {}).get('wandb_name',"default_wandb_name"),
+
     )
 
 if __name__ == "__main__":
     main()
-

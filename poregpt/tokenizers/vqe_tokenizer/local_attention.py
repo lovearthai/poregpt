@@ -77,8 +77,56 @@ class LocalTransformerEncoderLayer(nn.Module):
         src = src + self.ffn(x)
         return src
 
+    def forward_chunked(self, src: torch.Tensor, chunk_size: int = 500, overlap_size: int = 65) -> torch.Tensor:
+        """
+        分块处理长序列，保持梯度链完整性
+        
+        Args:
+            src: [B, T, C]
+            chunk_size: 基础块大小
+            overlap_size: 重叠大小，应与window_size相当
+        """
+        B, T, C = src.shape
+        
+        if T <= chunk_size:
+            return self.forward(src)
+        
+        # 分块处理
+        outputs = []
+        num_chunks = (T + chunk_size - 1) // chunk_size
+        
+        for i in range(num_chunks):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size + overlap_size, T)
+            
+            # 确保不会超出边界
+            if end_idx > T:
+                end_idx = T
+                start_idx = max(0, end_idx - chunk_size - overlap_size)
+            
+            # 提取块
+            chunk = src[:, start_idx:end_idx, :]  # [B, actual_chunk_size, C]
+            
+            # 通过当前层处理这个块
+            chunk_output = self.forward(chunk)
+            
+            # 提取非重叠部分
+            if i == 0:
+                # 第一块：取全部有效部分
+                effective_start = 0
+                effective_end = min(chunk_size, end_idx - start_idx)
+            else:
+                # 后续块：跳过重叠部分（保留重叠部分的计算结果以保持梯度）
+                effective_start = overlap_size
+                effective_end = min(chunk_size + overlap_size, end_idx - start_idx)
+            
+            effective_output = chunk_output[:, effective_start:effective_end, :]
+            outputs.append(effective_output)
+        
+        return torch.cat(outputs, dim=1)
+
 class LocalTransformerEncoder(nn.Module):
-    def __init__(self, d_model: int, nhead: int, num_layers: int, 
+    def __init__(self, d_model: int, nhead: int, num_layers: int,
                  window_size: int = 33, dim_feedforward: int = 1024, dropout: float = 0.1):
         super().__init__()
         self.layers = nn.ModuleList([
@@ -92,4 +140,25 @@ class LocalTransformerEncoder(nn.Module):
         output = src
         for layer in self.layers:
             output = layer(output)
+        return self.norm_final(output)
+
+    def forward_chunked(self, src: torch.Tensor, chunk_size: int = 500, overlap_size: int = 65) -> torch.Tensor:
+        """
+        分块处理长序列，保持梯度链完整性
+        
+        Args:
+            src: [B, T, C]
+            chunk_size: 基础块大小
+            overlap_size: 重叠大小，应与window_size相当
+        """
+        B, T, C = src.shape
+        
+        if T <= chunk_size:
+            return self.forward(src)
+        
+        # 对每一层都进行分块处理
+        output = src
+        for layer in self.layers:
+            output = layer.forward_chunked(output, chunk_size, overlap_size)
+        
         return self.norm_final(output)

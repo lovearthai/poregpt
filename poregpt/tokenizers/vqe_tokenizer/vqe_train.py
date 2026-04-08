@@ -47,6 +47,8 @@ from .vqe_model_v19 import NanoporeVQEModel_V19
 from .vqe_model_v20 import NanoporeVQEModel_V20
 from .vqe_model_v21 import NanoporeVQEModel_V21
 from .vqe_model_v22 import NanoporeVQEModel_V22
+from .vqe_model_v23 import NanoporeVQEModel_V23
+from .vqe_model_v24 import NanoporeVQEModel_V24
 from accelerate import InitProcessGroupKwargs
 from datetime import timedelta
 
@@ -583,27 +585,57 @@ def vqe_train(
         local_comit_loss = 0.0
         num_batches = 0
 
-        # --- 根据模型类型初始化分布式计数器 ---
-        # 将token计数张量分配到加速器设备（GPU）上，以便在推理时直接操作
-        if model_type in [1, 2, 3,8,15,16,21,22]: # VQ1/2/3: 整体一个码本，视为第0层
+        
+        
+    
+
+        ## --- 根据模型类型初始化分布式计数器 ---
+        ## 将token计数张量分配到加速器设备（GPU）上，以便在推理时直接操作
+        #if model_type in [1, 2, 3,8,15,16,21,22]: # VQ1/2/3: 整体一个码本，视为第0层
+        #    token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
+        #    token_counts_gpu_1 = None # 该模型类型无第二层
+        #    token_counts_gpu_2 = None # <-- 新增
+        #    token_counts_gpu_3 = None # <-- 新增
+        #elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]: # RVQ: 明确为两层
+        #    #assert n_q == 2, f"For model_type 4, n_q must be 2, got {n_q}" # 确保模型配置正确
+        #    token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
+        #    token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
+        #    token_counts_gpu_2 = None # <-- 新增
+        #    token_counts_gpu_3 = None # <-- 新增
+        #elif model_type in [7,9]: # RVQ: 明确为两层
+        #    #assert n_q == 2, f"For model_type 4, n_q must be 2, got {n_q}" # 确保模型配置正确
+        #    token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
+        #    token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
+        #    token_counts_gpu_2 = torch.zeros(codebook_size, device=accelerator.device)
+        #    token_counts_gpu_3 = torch.zeros(codebook_size, device=accelerator.device)
+        #else:
+        #    raise ValueError(f"Unknown model_type: {model_type}")
+
+        if codebook_nqtz == 1:
             token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_1 = None # 该模型类型无第二层
             token_counts_gpu_2 = None # <-- 新增
             token_counts_gpu_3 = None # <-- 新增
-        elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]: # RVQ: 明确为两层
-            #assert n_q == 2, f"For model_type 4, n_q must be 2, got {n_q}" # 确保模型配置正确
+        elif codebook_nqtz == 2: 
             token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_2 = None # <-- 新增
             token_counts_gpu_3 = None # <-- 新增
-        elif model_type in [7,9]: # RVQ: 明确为两层
-            #assert n_q == 2, f"For model_type 4, n_q must be 2, got {n_q}" # 确保模型配置正确
+        elif codebook_nqtz == 3: 
+            token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_2 = torch.zeros(codebook_size, device=accelerator.device)
+            token_counts_gpu_3 = None
+        elif codebook_nqtz == 4: 
             token_counts_gpu_0 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_1 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_2 = torch.zeros(codebook_size, device=accelerator.device)
             token_counts_gpu_3 = torch.zeros(codebook_size, device=accelerator.device)
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
+
+
+
 
         # --- 分布式调试信息 ---
         # 收集所有进程处理的batch数量，用于调试分布式训练是否均衡
@@ -643,8 +675,8 @@ def vqe_train(
                     flat_indices = indices.flatten()
                     # 使用scatter_add_原地更新计数张量，高效且内存友好
                     token_counts_gpu_0.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
-                elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]: # 处理 Residual Vector Quantization (RVQ) 模型
-                    if model_type in [11,12,13,14,17,18,19]:
+                elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20,23,24]: # 处理 Residual Vector Quantization (RVQ) 模型
+                    if model_type in [11,12,13,14,17,18,19,23,24]:
                         recon, indices,_ = model(x)
                     else:
                         recon, indices, all_loss, all_codes = model(x)
@@ -652,7 +684,7 @@ def vqe_train(
                     recon_loss = F.mse_loss(recon, x)
                     local_recon_loss = recon_loss.item() # RVQ的损失结构可能不同，此处按需调整
                     local_comit_loss = 0.0 # RVQ的损失结构可能不同，此处置零
-                    if model_type in [12]:
+                    if model_type in [12,23,24]:
                         # 2. 调用第一层重建
                         # 假设你的模型有这个方法，或者通过 indices 手动调用
                         #recon_first = model.module.decode_indices(indices,0) 
@@ -668,11 +700,16 @@ def vqe_train(
 
                     # indices的形状为 [Batch_Size, Time_Steps, Num_Quantizers]
                     B, T, n_quantizers = indices.shape
-                    assert n_quantizers == 2, f"Expected 2 quantizers, got {n_quantizers}"
+                    #assert n_quantizers == 2, f"Expected 2 quantizers, got {n_quantizers}"
 
                     # 分别提取每一层的indices
-                    layer_0_indices = indices[:, :, 0].flatten() # [B*T]
-                    layer_1_indices = indices[:, :, 1].flatten() # [B*T]
+                    if n_quantizers >= 1:
+                        layer_0_indices = indices[:, :, 0].flatten() # [B*T]
+                    if n_quantizers >= 2:
+                        layer_1_indices = indices[:, :, 1].flatten() # [B*T]
+                    if n_quantizers >= 3:
+                        layer_2_indices = indices[:, :, 2].flatten() # [B*T]
+
 
                     # --- 统计 Layer 0 ---
                     # 应用掩码过滤掉无效token（例如-1）
@@ -686,6 +723,14 @@ def vqe_train(
                     valid_flat_indices_1 = layer_1_indices[valid_mask_1]
                     if valid_flat_indices_1.numel() > 0:
                         token_counts_gpu_1.scatter_add_(0, valid_flat_indices_1, torch.ones_like(valid_flat_indices_1, dtype=torch.float))
+                    
+                    # --- 统计 Layer 2 ---
+                    valid_mask_2 = (layer_2_indices >= 0) & (layer_2_indices < codebook_size)
+                    valid_flat_indices_2 = layer_2_indices[valid_mask_2]
+                    if valid_flat_indices_2.numel() > 0:
+                        token_counts_gpu_2.scatter_add_(0, valid_flat_indices_2,torch.ones_like(valid_flat_indices_2, dtype=torch.float))
+
+
                 elif model_type in [7,9]: # <-- 新增
                     # 处理 4-Level Residual Vector Quantization (RVQ) 模型
                     recon, indices, all_loss, all_codes = model(x)
@@ -734,20 +779,54 @@ def vqe_train(
 
         # --- 分布式聚合 (All-Reduce) ---
         # 将所有GPU上计算的计数结果汇总到一起
-        if model_type in [1, 2, 3,8,15,16,21,22]:
+        #if model_type in [1, 2, 3,8,15,16,21,22]:
+        #    global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
+        #    global_counts_0 = global_counts_tensor_0.cpu().numpy() # 转换回CPU numpy数组以便计算
+        #    global_counts_1 = None
+        #    global_counts_2 = None
+        #    global_counts_3 = None
+        #elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]:
+        #    global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
+        #    global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
+        #    global_counts_0 = global_counts_tensor_0.cpu().numpy()
+        #    global_counts_1 = global_counts_tensor_1.cpu().numpy()
+        #    global_counts_2 = None
+        #    global_counts_3 = None
+        #elif model_type in [7,9]:
+        #    global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
+        #    global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
+        #    global_counts_tensor_2 = accelerator.reduce(token_counts_gpu_2, reduction="sum") # <-- 新增
+        #    global_counts_tensor_3 = accelerator.reduce(token_counts_gpu_3, reduction="sum") # <-- 新增
+        #    global_counts_0 = global_counts_tensor_0.cpu().numpy()
+        #    global_counts_1 = global_counts_tensor_1.cpu().numpy()
+        #    global_counts_2 = global_counts_tensor_2.cpu().numpy() # <-- 新增
+        #    global_counts_3 = global_counts_tensor_3.cpu().numpy() # <-- 新增
+        #else:
+        #    # Should not reach here due to earlier check
+        #    global_counts_0 = global_counts_1 = global_counts_2 = global_counts_3 = None
+ 
+        if codebook_nqtz == 1:
             global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
             global_counts_0 = global_counts_tensor_0.cpu().numpy() # 转换回CPU numpy数组以便计算
             global_counts_1 = None
             global_counts_2 = None
             global_counts_3 = None
-        elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]:
+        elif codebook_nqtz == 2:
             global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
             global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
             global_counts_0 = global_counts_tensor_0.cpu().numpy()
             global_counts_1 = global_counts_tensor_1.cpu().numpy()
             global_counts_2 = None
             global_counts_3 = None
-        elif model_type in [7,9]:
+        elif codebook_nqtz == 3:
+            global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
+            global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
+            global_counts_tensor_2 = accelerator.reduce(token_counts_gpu_2, reduction="sum")
+            global_counts_0 = global_counts_tensor_0.cpu().numpy()
+            global_counts_1 = global_counts_tensor_1.cpu().numpy()
+            global_counts_2 = global_counts_tensor_2.cpu().numpy()
+            global_counts_3 = None
+        elif codebook_nqtz == 4:
             global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
             global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
             global_counts_tensor_2 = accelerator.reduce(token_counts_gpu_2, reduction="sum") # <-- 新增
@@ -1162,6 +1241,26 @@ def vqe_train(
             cnn_checkpoint_path = cnn_checkpoint_path,
             freeze_cnn = freeze_cnn,
         )
+    elif model_type == 23:
+        model = NanoporeVQEModel_V23(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
+    elif model_type == 24:
+        model = NanoporeVQEModel_V24(
+            fsq_level_d=fsq_level_d,
+            fsq_level_n=fsq_level_n,
+            codebook_size=codebook_size,
+            codebook_nqtz=codebook_nqtz,
+            cnn_type=cnn_type,
+            cnn_checkpoint_path = cnn_checkpoint_path,
+            freeze_cnn = freeze_cnn,
+        )
     else:
         print("error model type. exit")
         return 
@@ -1448,7 +1547,7 @@ def vqe_train(
                     diver_loss = torch.tensor(0.0)
                     ortho_loss = torch.tensor(0.0)
                     total_loss = recon_loss
-                elif model_type in [11,12,13,14,17,18,19,20]:
+                elif model_type in [11,12,13,14,17,18,19,20,23,24]:
                     recon, indices, uni_indices = model(x)
                     recon_loss = F.mse_loss(recon, x)
                     comit_loss = torch.tensor(0.0)
