@@ -523,7 +523,7 @@ def vqe_train(
     # Data Loading
     # ========================
     # DataLoader's batch_size is now the micro-batch size per device/process.
-    train_dataset = NanoporeSignalDataset(shards_dir=train_npy_dir,logic_chunk_size=dataset_logic_chunk_size,logic_chunk_overlap_size=100)
+    train_dataset = NanoporeSignalDataset(shards_dir=train_npy_dir,logic_chunk_size=dataset_logic_chunk_size,logic_chunk_overlap_size=100,max_cache_size=256)
     # Accelerate provides a convenient way to create distributed samplers
     train_dataloader = DataLoader(
         train_dataset,
@@ -571,10 +571,13 @@ def vqe_train(
             #              entropy_val_1, 
             #              max_entropy, recon_loss, comit_loss
             # 对于VQ1/2/3, 第二套指标 (_1) 将全部为0或默认值
-            default_metrics = [0.0] * 47
+            default_metrics = [0.0] * 50
             default_metrics[44] = np.log2(codebook_size) # max_entropy
             default_metrics[45] = 0.0 # recon_loss placeholder
             default_metrics[46] = 0.0 # comit_loss placeholder
+            default_metrics[47] = 0.0 # comit_loss placeholder
+            default_metrics[48] = 0.0 # comit_loss placeholder
+            default_metrics[49] = 0.0 # comit_loss placeholder
             return tuple(default_metrics)
 
         # --- 初始化累积变量 ---
@@ -582,6 +585,7 @@ def vqe_train(
         local_recon_loss = 0.0
         local_recon_loss_first = 0.0  # 新增：第一层重建损失
         local_erer_first = 0.0       # 新增：第一层能量残差比
+        local_snr_first = 0.0 # 👈 新增：用于累加 SNR First
         local_comit_loss = 0.0
         num_batches = 0
 
@@ -682,22 +686,38 @@ def vqe_train(
                         recon, indices, all_loss, all_codes = model(x)
 
                     recon_loss = F.mse_loss(recon, x)
-                    local_recon_loss = recon_loss.item() # RVQ的损失结构可能不同，此处按需调整
+                    local_recon_loss += recon_loss.item() # RVQ的损失结构可能不同，此处按需调整
                     local_comit_loss = 0.0 # RVQ的损失结构可能不同，此处置零
                     if model_type in [12,23,24]:
                         # 2. 调用第一层重建
                         # 假设你的模型有这个方法，或者通过 indices 手动调用
-                        #recon_first = model.module.decode_indices(indices,0) 
+                        recon_first = model.module.decode_indices(indices,1) 
                         # 3. 计算第一层指标
-                        #loss_first = F.mse_loss(recon_first, x)
-                        #local_recon_loss_first += loss_first.item()
-                        local_recon_loss_first +=0
+                        loss_first = F.mse_loss(recon_first, x)
+                        local_recon_loss_first += loss_first.item()
                         # 4. 计算能量残差比 (ERER)
                         # diff_norm / full_signal_norm
-                        #erer = torch.norm(recon - recon_first) / (torch.norm(recon) + 1e-8)
-                        #local_erer_first += erer.item()
-                        local_erer_first += 0
-
+                        erer = torch.norm(recon - recon_first) / (torch.norm(recon) + 1e-8)
+                        local_erer_first += erer.item()
+                        # 👇 新增：计算 SNR First (信噪比)
+                        # 信号功率 (原始信号)
+                        signal_power = torch.mean(x ** 2)
+                        # 噪声功率 (原始信号与第一层重建信号的差值)
+                        noise_power = torch.mean((x - recon_first) ** 2)
+                        # 防止除零，计算 SNR (dB)
+                        snr_first = 10 * torch.log10(signal_power / (noise_power + 1e-8))
+                        # 最后求的值是15附近
+                        # 在纳米孔（Nanopore）信号重建或 VQ-VAE 任务中，SNR 为 15 dB 左右是非常正常的，
+                        # 甚至可以说是处于一个“高质量重建”的区间。
+                        # 1. 15 dB 代表了什么？
+                        # SNR（信噪比）的公式是 $10 \cdot \log_{10}(\frac{Signal}{Noise})$。
+                        # 10 dB：意味着信号功率是噪声功率的 10 倍。
+                        # 15 dB：意味着信号功率大约是噪声功率的 31.6 倍。
+                        # 20 dB：信号功率是噪声功率的 100 倍。
+                        # 在生物电信号处理中，原始电流信号本身就含有大量的热噪声、孔道阻碍噪声和电子基底噪声。
+                        # 如果你的 VQ-VAE 模型能够达到 15 dB，意味着它已经抓住了 97% 左右的信号能量，剩下的 3% 被归为残差（噪声）
+                        # 
+                        local_snr_first += snr_first.item()
                     # indices的形状为 [Batch_Size, Time_Steps, Num_Quantizers]
                     B, T, n_quantizers = indices.shape
                     #assert n_quantizers == 2, f"Expected 2 quantizers, got {n_quantizers}"
@@ -724,18 +744,12 @@ def vqe_train(
                     if valid_flat_indices_1.numel() > 0:
                         token_counts_gpu_1.scatter_add_(0, valid_flat_indices_1, torch.ones_like(valid_flat_indices_1, dtype=torch.float))
                     
-                    # --- 统计 Layer 2 ---
-                    valid_mask_2 = (layer_2_indices >= 0) & (layer_2_indices < codebook_size)
-                    valid_flat_indices_2 = layer_2_indices[valid_mask_2]
-                    if valid_flat_indices_2.numel() > 0:
-                        token_counts_gpu_2.scatter_add_(0, valid_flat_indices_2,torch.ones_like(valid_flat_indices_2, dtype=torch.float))
-
 
                 elif model_type in [7,9]: # <-- 新增
                     # 处理 4-Level Residual Vector Quantization (RVQ) 模型
                     recon, indices, all_loss, all_codes = model(x)
                     recon_loss = F.mse_loss(recon, x)
-                    local_recon_loss = recon_loss.item()
+                    local_recon_loss += recon_loss.item()
                     local_comit_loss = 0.0 # 假设类似RVQ
                     # *** DEBUG: Print the dtype of indices ***
                     #print(f"DEBUG: Model type {model_type}, indices dtype: {indices.dtype}")
@@ -777,33 +791,6 @@ def vqe_train(
 
                 num_batches += 1
 
-        # --- 分布式聚合 (All-Reduce) ---
-        # 将所有GPU上计算的计数结果汇总到一起
-        #if model_type in [1, 2, 3,8,15,16,21,22]:
-        #    global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
-        #    global_counts_0 = global_counts_tensor_0.cpu().numpy() # 转换回CPU numpy数组以便计算
-        #    global_counts_1 = None
-        #    global_counts_2 = None
-        #    global_counts_3 = None
-        #elif model_type in [4,5,6,10,11,12,13,14,17,18,19,20]:
-        #    global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
-        #    global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
-        #    global_counts_0 = global_counts_tensor_0.cpu().numpy()
-        #    global_counts_1 = global_counts_tensor_1.cpu().numpy()
-        #    global_counts_2 = None
-        #    global_counts_3 = None
-        #elif model_type in [7,9]:
-        #    global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
-        #    global_counts_tensor_1 = accelerator.reduce(token_counts_gpu_1, reduction="sum")
-        #    global_counts_tensor_2 = accelerator.reduce(token_counts_gpu_2, reduction="sum") # <-- 新增
-        #    global_counts_tensor_3 = accelerator.reduce(token_counts_gpu_3, reduction="sum") # <-- 新增
-        #    global_counts_0 = global_counts_tensor_0.cpu().numpy()
-        #    global_counts_1 = global_counts_tensor_1.cpu().numpy()
-        #    global_counts_2 = global_counts_tensor_2.cpu().numpy() # <-- 新增
-        #    global_counts_3 = global_counts_tensor_3.cpu().numpy() # <-- 新增
-        #else:
-        #    # Should not reach here due to earlier check
-        #    global_counts_0 = global_counts_1 = global_counts_2 = global_counts_3 = None
  
         if codebook_nqtz == 1:
             global_counts_tensor_0 = accelerator.reduce(token_counts_gpu_0, reduction="sum")
@@ -845,20 +832,22 @@ def vqe_train(
             local_comit_loss,
             local_recon_loss_first, # 新增
             local_erer_first,       # 新增
+            local_snr_first, # 👈 新增：加入 SNR First
             float(num_batches)
             ], device=accelerator.device
         )
-        gathered_metrics = accelerator.gather(metrics).view(-1, 5)
+        gathered_metrics = accelerator.gather(metrics).view(-1, 6)
 
         # --- 后期处理（仅在主进程执行） ---
         if accelerator.is_main_process:
             # 计算全局平均 Loss
-            total_batches_all = gathered_metrics[:, 4].sum()
+            total_batches_all = gathered_metrics[:, 5].sum()
             global_recon_loss = (gathered_metrics[:, 0].sum() / total_batches_all).item()
             global_comit_loss = (gathered_metrics[:, 1].sum() / total_batches_all).item()
             # 新增指标计算
             global_recon_loss_first = (gathered_metrics[:, 2].sum() / total_batches_all).item()
             global_erer_first = (gathered_metrics[:, 3].sum() / total_batches_all).item()
+            global_snr_first = (gathered_metrics[:, 4].sum() / total_batches_all).item()
             # --- 计算每一层的指标 ---
             # Layer 0 (对于 VQ1/2/3，这是唯一的层；对于 RVQ，这是第一层)
             total_tokens_0 = int(np.sum(global_counts_0))
@@ -935,8 +924,9 @@ def vqe_train(
                 kl_div_2, used_code_n_2, usage_ratio_2, total_tokens_2, top1_ratio_2, top3_ratio_2, top5_ratio_2, top7_ratio_2, top9_ratio_2, top10_ratio_2, entropy_val_2,
                 kl_div_3, used_code_n_3, usage_ratio_3, total_tokens_3, top1_ratio_3, top3_ratio_3, top5_ratio_3, top7_ratio_3, top9_ratio_3, top10_ratio_3, entropy_val_3,
                 max_entropy, global_recon_loss, global_comit_loss,
-                global_recon_loss_first, # 位置 47
-                global_erer_first        # 位置 48
+                global_recon_loss_first,
+                global_erer_first,
+                global_snr_first
             )
         else: # 非主进程
             model.train()
@@ -1491,6 +1481,7 @@ def vqe_train(
     wandb_eval_comit_loss = 0
     wandb_eval_first_loss = 0
     wandb_eval_erer_loss = 0
+    wandb_eval_snr_loss = 0
 
 
     if use_dynamic_commitment_weight:
@@ -1649,6 +1640,7 @@ def vqe_train(
                         "evaluate/comit_loss": wandb_eval_comit_loss, # Placeholder
                         "evaluate/first_loss": wandb_eval_first_loss, # Placeholder
                         "evaluate/erer_loss": wandb_eval_erer_loss, # Placeholder
+                        "evaluate/snr_loss": wandb_eval_snr_loss, # Placeholder
 
 
                         "codebook/kldiv": wandb_kldiv, # Placeholder
@@ -1745,25 +1737,40 @@ def vqe_train(
                                wandb_codebook_top10_ratio_1, 
                                wandb_codebook_entropy_1, 
                              
-                               wandb_kldiv_2, wandb_codebook_used_2, wandb_codebook_usage_2, wandb_total_tokens_2,
-                               wandb_codebook_top1_ratio_2, wandb_codebook_top3_ratio_2, wandb_codebook_top5_ratio_2,
-                               wandb_codebook_top7_ratio_2, wandb_codebook_top9_ratio_2, wandb_codebook_top10_ratio_2,
+                               wandb_kldiv_2, 
+                               wandb_codebook_used_2, 
+                               wandb_codebook_usage_2, 
+                               wandb_total_tokens_2,
+                               wandb_codebook_top1_ratio_2, 
+                               wandb_codebook_top3_ratio_2, 
+                               wandb_codebook_top5_ratio_2,
+                               wandb_codebook_top7_ratio_2, 
+                               wandb_codebook_top9_ratio_2, 
+                               wandb_codebook_top10_ratio_2,
                                wandb_codebook_entropy_2,
 
-                               wandb_kldiv_3, wandb_codebook_used_3, wandb_codebook_usage_3, wandb_total_tokens_3,
-                               wandb_codebook_top1_ratio_3, wandb_codebook_top3_ratio_3, wandb_codebook_top5_ratio_3,
-                               wandb_codebook_top7_ratio_3, wandb_codebook_top9_ratio_3, wandb_codebook_top10_ratio_3,
+                               wandb_kldiv_3, 
+                               wandb_codebook_used_3, 
+                               wandb_codebook_usage_3, 
+                               wandb_total_tokens_3,
+                               wandb_codebook_top1_ratio_3, 
+                               wandb_codebook_top3_ratio_3, 
+                               wandb_codebook_top5_ratio_3,
+                               wandb_codebook_top7_ratio_3, 
+                               wandb_codebook_top9_ratio_3, 
+                               wandb_codebook_top10_ratio_3,
                                wandb_codebook_entropy_3,
 
                                wandb_codebook_max_entropy,
                                wandb_eval_recon_loss,
                                wandb_eval_comit_loss,
                                wandb_eval_first_loss,
-                               wandb_eval_erer_loss
+                               wandb_eval_erer_loss,
+                               wandb_eval_snr_loss
                                ) = result
                             print(f"Effective Step {global_step} - Codebook Usage: {wandb_codebook_usage:.2%} wandb_kldiv: {wandb_kldiv}")
                     except Exception as e:
-                            print(f"Error during evaluation: {e}")
+                        print(f"Error during evaluation: {e}")
 
                     try:
                         runtime_json = read_runtime_json() 

@@ -479,8 +479,8 @@ class VQETokenizer:
         return parts
 
     # tokenize_data不支持任何归一化, medf, lpf等操作
-    def tokenize_chunk(self, signal: np.ndarray) -> list:
-        flat_tokens = self._tokenize_chunked_signal(signal)
+    def tokenize_chunk(self, signal: np.ndarray,layer: int = 0) -> list:
+        flat_tokens = self._tokenize_chunked_signal(signal,layer)
         if flat_tokens.size == 0:
             return []
         parts = []

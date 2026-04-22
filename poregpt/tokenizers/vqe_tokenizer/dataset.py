@@ -7,7 +7,7 @@ from collections import OrderedDict
 
 
 class NanoporeSignalDataset(Dataset):
-    def __init__(self, shards_dir, logic_chunk_size=None, logic_chunk_overlap_size=100, max_cache_size=256):
+    def __init__(self, shards_dir, logic_chunk_size=None, logic_chunk_overlap_size=100, max_cache_size=32):
         """
         Args:
             shards_dir (str): Directory containing shards.npy and shards.json.

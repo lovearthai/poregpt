@@ -25,6 +25,7 @@ import os
 import glob
 import gzip
 import json
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
 
@@ -192,6 +193,34 @@ def _split_groups(groups: List[str], train_ratio: float, val_ratio: float, seed:
     return g_train, g_val, g_test
 
 
+def split_indices(
+    total_size: int,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 42,
+) -> Tuple[List[int], List[int], List[int]]:
+    """Randomly split sample indices into train/val/test."""
+    if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
+        raise ValueError("train_ratio + val_ratio + test_ratio must sum to 1.0")
+    if total_size <= 0:
+        return [], [], []
+
+    rng = np.random.default_rng(seed)
+    indices = np.arange(total_size)
+    rng.shuffle(indices)
+
+    n_train = int(round(total_size * train_ratio))
+    n_val = int(round(total_size * val_ratio))
+    n_train = min(max(n_train, 1), total_size)
+    n_val = min(max(n_val, 0), total_size - n_train)
+
+    train_idx = indices[:n_train].tolist()
+    val_idx = indices[n_train:n_train + n_val].tolist()
+    test_idx = indices[n_train + n_val:].tolist()
+    return train_idx, val_idx, test_idx
+
+
 def split_jsonl_files_by_group(
     jsonl_files: List[JsonlFile],
     train_ratio: float = 0.8,
@@ -311,6 +340,15 @@ def _normalize_tokens(value: Any) -> str:
     return str(value)
 
 
+_BWAV_TOKEN_RE = re.compile(r"<\|bwav:(\d+)\|>")
+
+
+def _apply_token_offset_to_signal_str(signal_str: str, token_offset: int) -> str:
+    if token_offset <= 0 or not signal_str:
+        return signal_str
+    return _BWAV_TOKEN_RE.sub(lambda m: f"<|bwav:{int(m.group(1)) + token_offset}|>", signal_str)
+
+
 def _iter_jsonl_records(path: str):
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
@@ -325,8 +363,10 @@ class MultiJsonlSignalRefDataset(Dataset):
     从 jsonl.gz 读取 text/bases 字段，输出与原 data.py 一致的格式：
       {"signal_str": str, "target_seq": List[int]}
     """
-    def __init__(self, jsonl_files: List[JsonlFile]):
+    def __init__(self, jsonl_files: List[JsonlFile], token_offset: int = 0):
         super().__init__()
+        if token_offset < 0:
+            raise ValueError("token_offset must be >= 0")
         self.signal_list: List[str] = []
         self.target_list: List[np.ndarray] = []
 
@@ -337,7 +377,7 @@ class MultiJsonlSignalRefDataset(Dataset):
                 if not signal_str or bases is None:
                     continue
                 labels = _parse_bases(bases)
-                self.signal_list.append(str(signal_str))
+                self.signal_list.append(_apply_token_offset_to_signal_str(str(signal_str), token_offset))
                 self.target_list.append(np.asarray(labels))
 
         print(f"[Dataset] Loaded {len(self.signal_list)} reads from {len(jsonl_files)} jsonl files")
@@ -357,8 +397,10 @@ class MultiNpySignalRefDataset(Dataset):
     从 tokens_*.npy / reference_*.npy 读取，输出与原 data.py 一致的格式：
       {"signal_str": str, "target_seq": List[int]}
     """
-    def __init__(self, npy_pairs: List[NpyPair]):
+    def __init__(self, npy_pairs: List[NpyPair], token_offset: int = 0):
         super().__init__()
+        if token_offset < 0:
+            raise ValueError("token_offset must be >= 0")
         self.signal_list: List[str] = []
         self.target_list: List[np.ndarray] = []
 
@@ -375,7 +417,7 @@ class MultiNpySignalRefDataset(Dataset):
                 if not signal_str:
                     continue
                 labels = _parse_bases(ref_row)
-                self.signal_list.append(signal_str)
+                self.signal_list.append(_apply_token_offset_to_signal_str(signal_str, token_offset))
                 self.target_list.append(np.asarray(labels))
 
         print(f"[Dataset] Loaded {len(self.signal_list)} reads from {len(npy_pairs)} npy pairs")
@@ -419,4 +461,85 @@ def create_collate_fn(tokenizer: PreTrainedTokenizerBase):
             "target_lengths": target_lengths,
             "target_seqs": target_seqs,
         }
+    return fn
+
+
+_BWAV_ID_PATTERN = re.compile(r"<\|bwav:(\d+)\|>", flags=re.IGNORECASE)
+
+
+def _parse_signal_to_token_ids(signal_str: str) -> List[int]:
+    if not signal_str:
+        return []
+    text = str(signal_str).strip()
+    if not text:
+        return []
+
+    bwav_ids = [int(x) for x in _BWAV_ID_PATTERN.findall(text)]
+    if bwav_ids:
+        return bwav_ids
+
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [int(x) for x in parsed]
+        except json.JSONDecodeError:
+            pass
+
+    if "," in text:
+        out: List[int] = []
+        for part in text.split(","):
+            s = part.strip()
+            if not s:
+                continue
+            out.append(int(s))
+        return out
+
+    if text.isdigit():
+        return [int(text)]
+    return []
+
+
+def create_vq_collate_fn():
+    """
+    Collate for VQ tokenize-model embedding mode.
+    signal_str should contain repeated <|bwav:ID|> tokens.
+    """
+
+    def fn(batch: List[Dict[str, Any]]):
+        signal_strs = [b["signal_str"] for b in batch]
+        target_seqs = [b["target_seq"] for b in batch]
+        id_seqs = [_parse_signal_to_token_ids(s) for s in signal_strs]
+        bad_indices = [i for i, seq in enumerate(id_seqs) if len(seq) == 0]
+        if bad_indices:
+            show = bad_indices[:5]
+            examples = [signal_strs[i][:120] for i in show]
+            raise ValueError(
+                "create_vq_collate_fn could not parse token ids from signal_str. "
+                f"bad_indices={show} examples={examples} (expected '<|bwav:ID|>...' or '[1,2,...]' or '1,2,...')."
+            )
+
+        max_len = max((len(x) for x in id_seqs), default=0)
+        input_ids = torch.zeros((len(id_seqs), max_len), dtype=torch.long)
+        attention_mask = torch.zeros((len(id_seqs), max_len), dtype=torch.long)
+        for i, ids in enumerate(id_seqs):
+            if not ids:
+                continue
+            cur = torch.tensor(ids, dtype=torch.long)
+            input_ids[i, : len(ids)] = cur
+            attention_mask[i, : len(ids)] = 1
+
+        input_lengths = resolve_input_lengths(input_ids, attention_mask=attention_mask)
+        target_lengths = torch.tensor([len(x) for x in target_seqs], dtype=torch.long)
+        target_labels = torch.cat([torch.tensor(x, dtype=torch.long) for x in target_seqs]) if target_seqs else torch.empty(0, dtype=torch.long)
+
+        return {
+            "input_ids": input_ids,
+            "input_lengths": input_lengths,
+            "attention_mask": attention_mask,
+            "target_labels": target_labels,
+            "target_lengths": target_lengths,
+            "target_seqs": target_seqs,
+        }
+
     return fn

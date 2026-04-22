@@ -303,7 +303,6 @@ class NanoporeVQEModel_V12(nn.Module):
     #layer == 0 → 使用全部 K 层（原 decode_from_level_indices）
     #layer == 1 → 仅第一层（原 decode_from_first_layer）
     #layer == 2 → 前两层，依此类推 
-
     def decode_indices(
         self,
         level_indices: torch.Tensor,
@@ -358,7 +357,6 @@ class NanoporeVQEModel_V12(nn.Module):
             recon = recon[..., :target_len]
         elif current_len < target_len:
             recon = F.pad(recon, (0, target_len - current_len))
-
         return recon
 
     def tokenize_indices(

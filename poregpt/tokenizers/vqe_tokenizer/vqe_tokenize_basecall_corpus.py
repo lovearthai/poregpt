@@ -13,7 +13,7 @@ import torch
 from ...utils.signal import nanopore_process_signal
 import time
 
-def process_single_fast5(fast5_path, csv_path, model_path, device, output_dir, nanopore_signal_process_strategy="apple"):
+def process_single_fast5(fast5_path, csv_path, model_path, device, output_dir, nanopore_signal_process_strategy="mongo",layer=0,quality=30.0):
     """
     处理单个 FAST5 文件及其对应的 CSV 文件。
 
@@ -27,7 +27,9 @@ def process_single_fast5(fast5_path, csv_path, model_path, device, output_dir, n
     """
     print(f"📖 正在读取 FAST5: {fast5_path}")
     print(f"📖 正在读取 CSV: {csv_path}")
-
+    
+    # 在函数内部先计算出实际的阈值
+    threshold = quality / 10.0  # 30 -> 3.0
     # 初始化 tokenizer 并指定设备
     tokenizer = VQETokenizer(
         model_ckpt=model_path,
@@ -115,9 +117,16 @@ def process_single_fast5(fast5_path, csv_path, model_path, device, output_dir, n
 
                     chunk_signal = signal_processed[chunk_start:chunk_end]
 
+                    # --- 在这里插入修改逻辑 ---
+                    # 检查是否超出正负阈值 (即：最大值 > threshold 或 最小值 < -threshold)
+                    if np.any(chunk_signal > threshold) or np.any(chunk_signal < -threshold):
+                        # print(f"    ⚠️  Read {read_id}: 片段超出质量阈值 {threshold}，跳过。")
+                        overall_pbar.update(1)
+                        continue
+                    # -----------------------
                     # --- 标记化片段 ---
                     # time0 = time.time() # 可选：取消注释以测量时间
-                    tokens = tokenizer.tokenize_chunk(chunk_signal)
+                    tokens = tokenizer.tokenize_chunk(chunk_signal,layer=layer)
                     text = "".join(tokens)
                     # time1 = time.time() # 可选：取消注释以测量时间
                     # time_cost = time1 - time0 # 可选：取消注释以测量时间
@@ -167,9 +176,16 @@ def main():
     parser.add_argument('--device', type=str, default='cuda', help='Device to run the tokenizer on (e.g., cpu, cuda, cuda:0). Defaults to cuda.')
     parser.add_argument('--output_dir', type=str, required=True, help='Directory to save the output JSONL.GZ file.') # 新增参数
     parser.add_argument('--signal_strategy', type=str, default='apple', help='Nanopore signal processing strategy. Defaults to apple.')
-
+    parser.add_argument('--layer', type=int, default=0, help='tokenize layer')
+    # 找到 main() 函数中解析参数的地方，添加这一行
+    parser.add_argument('--quality', type=float, default=30.0, help='Signal quality threshold (e.g. 30 means 0.3).')
+    
     args = parser.parse_args()
-
+    
+    # 然后在下方获取该值
+    quality = args.quality
+    # 在打印配置的地方加上它
+    print(f"  Quality Threshold: {quality} (Mapped to {quality/100.0})")
     # 从命令行参数获取值
     fast5_path = args.fast5_path
     csv_path = args.csv_path
@@ -177,7 +193,7 @@ def main():
     device = args.device
     output_dir = args.output_dir # 获取新增参数
     signal_strategy = args.signal_strategy
-
+    layer = args.layer
     # 打印所有加载的配置参数
     print("--- Loaded Configuration from Command Line Args ---")
     print(f"  FAST5 Path (fast5_path): {fast5_path}")
@@ -196,7 +212,9 @@ def main():
         model_path=model_path,
         device=device,
         output_dir=output_dir, # 传递新增参数
-        nanopore_signal_process_strategy=signal_strategy
+        nanopore_signal_process_strategy=signal_strategy,
+        layer=layer,
+        quality=quality
     )
 
 if __name__ == "__main__":
