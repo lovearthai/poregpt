@@ -490,7 +490,7 @@ class VQETokenizer:
 
 
 
-    def tokenize_read(self, read, nanopore_signal_process_strategy="apple") -> list:
+    def tokenize_read(self, read, nanopore_signal_process_strategy="apple",layer=0,quality=30) -> list:
         try:
             channel_info = read.handle[read.global_key + 'channel_id'].attrs
             offset = int(channel_info['offset'])
@@ -498,20 +498,40 @@ class VQETokenizer:
             raw = read.handle[read.raw_dataset_name][:]
             signal_raw = np.array(scaling * (raw + offset), dtype=np.float32)
             signal_processed = nanopore_process_signal(signal_raw,nanopore_signal_process_strategy)
-            return self.tokenize_data(signal_processed)
+
+            # --- 逻辑修改：仅当 quality > 0 时执行截断 ---
+            if quality > 0:
+                delta = quality / 10.0
+                max_bound = delta
+                min_bound = -delta
+
+                # 执行截断
+                signal_processed = np.clip(signal_processed, min_bound, max_bound)
+                # print(f"Applied clipping with bounds: [{min_bound}, {max_bound}]") # 调试用
+            else:
+                # 如果 quality 为 0，跳过阶段处理，直接进入下一步
+                # print("Quality is 0, skipping clipping.") # 调试用
+                pass
+
+            return self.tokenize_data(signal_processed,layer)
         except Exception as e:
             fast5_path = getattr(read.handle, 'filename', 'unknown.fast5')
             print(f"❌ Error on read {read.read_id} in {fast5_path}: {e}")
             return []
     
 
-    def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple"):
-        print(f"✅ Processing {fast5_path} with strategy{nanopore_signal_process_strategy}")
+    def tokenize_fast5(self, fast5_path: str, output_path:str, nanopore_signal_process_strategy="apple",layer=0,quality=30):
+        print(f"✅ Tokenizing fast5:{fast5_path} with strategy:{nanopore_signal_process_strategy} quality:{quality} layer:{layer}")
         results = []
         with get_fast5_file(fast5_path, mode="r") as f5:
             for read in tqdm(f5.get_reads(), desc=os.path.basename(fast5_path)):
                 try:
-                    token_list = self.tokenize_read(read,nanopore_signal_process_strategy)
+                    token_list = self.tokenize_read(
+                        read,
+                        nanopore_signal_process_strategy,
+                        quality,
+                        layer
+                    )
                     token_str = "".join(token_list)
                     results.append({"id": read.read_id, "text": token_str})
                 except Exception as e:
