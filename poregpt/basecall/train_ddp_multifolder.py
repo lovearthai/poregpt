@@ -23,6 +23,7 @@ import os
 import socket
 import math
 import argparse
+import gzip
 import matplotlib.pyplot as plt
 import logging
 from contextlib import nullcontext
@@ -32,9 +33,9 @@ import numpy as np
 
 import torch
 import torch.distributed as dist
-from accelerate import Accelerator
+from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, IterableDataset
 from tqdm.auto import tqdm
 
 from .utils import seed_everything, BLANK_IDX, ID2BASE, resolve_input_lengths
@@ -56,9 +57,13 @@ from .data_multifolder import (
     scan_npy_pairs,
     split_npy_pairs_by_group,
     split_indices,
+    split_npy_records_per_file,
+    split_jsonl_records_per_file,
     MultiNpySignalRefDataset,
     create_collate_fn,
     create_vq_collate_fn,
+    StreamingJsonlSignalRefDataset,
+    StreamingNpySignalRefDataset,
 )
 from .callback import plot_alignment_heatmap
 
@@ -143,6 +148,65 @@ def reduce_mean(accelerator: Accelerator, value: float, device: torch.device) ->
 def reduce_min(accelerator: Accelerator, value: int, device: torch.device) -> bool:
     tensor = torch.tensor(int(value), device=device, dtype=torch.int)
     return bool(accelerator.gather(tensor.unsqueeze(0)).min().item())
+
+
+def _safe_len(x) -> Optional[int]:
+    try:
+        return len(x)
+    except TypeError:
+        return None
+
+
+def _safe_len_str(x) -> str:
+    n = _safe_len(x)
+    return str(n) if n is not None else "?"
+
+
+def _count_jsonl_records(path: str) -> int:
+    n = 0
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                n += 1
+    return n
+
+
+def _count_npy_records(path: str) -> int:
+    arr = np.load(path, allow_pickle=True)
+    if isinstance(arr, np.ndarray):
+        if arr.ndim == 0:
+            return 1
+        return int(arr.shape[0])
+    return 1
+
+
+def _estimate_streaming_train_size(dataset) -> Optional[int]:
+    """
+    Estimate iterable train dataset size for scheduler/steps_per_epoch fallback.
+    """
+    if isinstance(dataset, StreamingJsonlSignalRefDataset):
+        total = sum(_count_jsonl_records(jf.path) for jf in dataset.jsonl_files)
+        if dataset.split_mode in ("folder", "file"):
+            return total
+        return int(round(total * float(dataset.train_ratio)))
+    if isinstance(dataset, StreamingNpySignalRefDataset):
+        total = sum(_count_npy_records(pair.tokens_path) for pair in dataset.npy_pairs)
+        if dataset.split_mode in ("folder", "file"):
+            return total
+        return int(round(total * float(dataset.train_ratio)))
+    return None
+
+
+def _rebuild_target_seqs(target_labels: torch.Tensor, target_lengths: torch.Tensor) -> List[List[int]]:
+    labels = target_labels.detach().cpu().tolist()
+    lengths = target_lengths.detach().cpu().tolist()
+    out: List[List[int]] = []
+    offset = 0
+    for ln in lengths:
+        ln_i = int(ln)
+        out.append([int(x) for x in labels[offset: offset + ln_i]])
+        offset += ln_i
+    return out
 
 
 def setup_logger(log_file: str, accelerator: Accelerator) -> logging.Logger:
@@ -299,7 +363,9 @@ def load_checkpoint(path: str,
 
     start_epoch = int(ckpt.get("epoch", 0)) + 1
     best_pbma = ckpt.get("best_pbma", None)
-    return start_epoch, best_pbma
+    global_step = int(ckpt.get("global_step", 0) or 0)
+    wandb_run_id = ckpt.get("wandb_run_id", None)
+    return start_epoch, best_pbma, global_step, wandb_run_id
 
 
 # -------------------- train/eval --------------------
@@ -317,12 +383,15 @@ def train_one_epoch(
     use_amp: bool,
     clip_grad_norm: float,
     head_type: str,
+    global_step_start: int = 0,
 ):
     model.train()
     total_loss, n_batches = 0.0, 0
 
-    it = tqdm(enumerate(data_loader, start=1), total=len(data_loader),
+    total_steps_hint = _safe_len(data_loader)
+    it = tqdm(enumerate(data_loader, start=1), total=total_steps_hint,
               disable=not is_main_process(accelerator), desc="[train]")
+    global_step = int(global_step_start)
     for step, batch in it:
         input_ids = batch["input_ids"].to(device)
         input_lengths = resolve_input_lengths(
@@ -333,6 +402,7 @@ def train_one_epoch(
 
         target_labels = batch["target_labels"].to(device)
         target_lengths = batch["target_lengths"].to(device)
+        target_seqs = _rebuild_target_seqs(target_labels, target_lengths)
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -372,21 +442,31 @@ def train_one_epoch(
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
+            global_step += 1
         elif is_main_process(accelerator):
-            print(f"[Train] step={step}/{len(data_loader)} non-finite loss detected on >=1 rank; skipping optimizer step on all ranks.")
+            step_den = total_steps_hint if total_steps_hint is not None else "?"
+            print(f"[Train] step={step}/{step_den} non-finite loss detected on >=1 rank; skipping optimizer step on all ranks.")
 
         total_loss += float(loss.item())
         n_batches += 1
 
         if is_main_process(accelerator) and (step % log_interval == 0):
             lr = optimizer.param_groups[0]["lr"]
-            msg = f"[Train] step={step}/{len(data_loader)} loss={loss.item():.4f} lr={lr:.6g}"
+            step_den = total_steps_hint if total_steps_hint is not None else "?"
+            msg = f"[Train] step={step}/{step_den} loss={loss.item():.4f} lr={lr:.6g}"
             print(msg)
             if use_wandb and wandb is not None:
-                wandb.log({"train/loss": float(loss.item()), "lr": float(lr), "step": step})
+                wandb.log(
+                    {
+                        "train/loss": float(loss.item()),
+                        "lr": float(lr),
+                        "trainer/global_step": int(global_step),
+                    },
+                    step=int(global_step),
+                )
 
     avg = total_loss / max(n_batches, 1)
-    return reduce_mean(accelerator, avg, device)
+    return reduce_mean(accelerator, avg, device), global_step
 
 
 @torch.no_grad()
@@ -412,7 +492,8 @@ def eval_one_epoch(
     blank_ratios: List[float] = []
     nonzero_lengths: List[float] = []
 
-    it = tqdm(data_loader, total=len(data_loader),
+    total_steps_hint = _safe_len(data_loader)
+    it = tqdm(data_loader, total=total_steps_hint,
               disable=not is_main_process(accelerator), desc=f"[{split_name}]")
     for batch in it:
         input_ids = batch["input_ids"].to(device)
@@ -424,6 +505,7 @@ def eval_one_epoch(
 
         target_labels = batch["target_labels"].to(device)
         target_lengths = batch["target_lengths"].to(device)
+        target_seqs = _rebuild_target_seqs(target_labels, target_lengths)
         
         attention_mask = batch.get("attention_mask", None)
         if attention_mask is not None:
@@ -481,14 +563,14 @@ def eval_one_epoch(
 
         acc = batch_bonito_accuracy(
             pred_seqs,
-            batch["target_seqs"],
+            target_seqs,
             balanced=acc_balanced,
             min_coverage=acc_min_coverage,
         )
         total_acc += float(acc)
         n_acc += 1
 
-        for r_ids, pred_ids, input_len in zip(batch["target_seqs"], pred_seqs, input_len_list):
+        for r_ids, pred_ids, input_len in zip(target_seqs, pred_seqs, input_len_list):
             step_len = int(input_len)
             if step_len <= 0:
                 blank_ratios.append(1.0)
@@ -522,6 +604,76 @@ def eval_one_epoch(
     avg_blank = reduce_mean(accelerator, avg_blank, device)
     avg_nonzero_len = reduce_mean(accelerator, avg_nonzero_len, device)
     return avg_loss, avg_acc, avg_crf_acc, avg_cov, avg_blank, avg_nonzero_len
+
+
+@torch.no_grad()
+def log_alignment_to_wandb(
+    accelerator: Accelerator,
+    model,
+    loader,
+    device,
+    use_amp: bool,
+    decoder_mode: str,
+    blank_idx: int,
+    koi_blank_score: float,
+    image_key: str,
+    epoch: Optional[int] = None,
+    global_step: Optional[int] = None,
+):
+    if loader is None or not is_main_process(accelerator) or wandb is None:
+        return
+    batch = next(iter(loader))
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch.get("attention_mask", None)
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device)
+    with accelerator.autocast() if use_amp else nullcontext():
+        logits_btc = model(input_ids, attention_mask=attention_mask)
+    logits_tbc = logits_btc.transpose(0, 1)
+    input_lengths = resolve_input_lengths(
+        input_ids,
+        attention_mask=attention_mask,
+        input_lengths=batch.get("input_lengths"),
+    )
+    if decoder_mode == "koi":
+        pred_seqs = koi_beam_search_decode(
+            logits_tbc,
+            blank_score=float(koi_blank_score),
+            input_lengths=input_lengths,
+        )
+    elif decoder_mode == "ctc_viterbi":
+        pred_seqs = ctc_viterbi_decode(
+            logits_tbc,
+            input_lengths=input_lengths,
+            blank_idx=blank_idx,
+        )
+    else:
+        pred_seqs = []
+        input_len_list = input_lengths.detach().cpu().tolist()
+        for idx, input_len in enumerate(input_len_list):
+            step_len = int(input_len)
+            if step_len <= 0:
+                pred_seqs.append([])
+                continue
+            decoded_ids = ctc_crf_decode(
+                logits_tbc[:step_len, idx : idx + 1, :].float(),
+                blank_idx=blank_idx,
+            )[0]
+            pred_seqs.append(decoded_ids[:step_len])
+
+    ref_seqs = _rebuild_target_seqs(
+        batch["target_labels"].to(device),
+        batch["target_lengths"].to(device),
+    )
+    fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
+    payload: Dict[str, Any] = {image_key: wandb.Image(fig)}
+    if epoch is not None:
+        payload["epoch"] = int(epoch)
+    if global_step is None:
+        wandb.log(payload)
+    else:
+        wandb.log(payload, step=int(global_step))
+    plt.close(fig)
 
 
 # -------------------- pretrained loader (keep) --------------------
@@ -598,8 +750,8 @@ def parse_args():
                    help="Comma-separated folders or tokens_*.npy/reference_*.npy files for validation set.")
     p.add_argument("--test_npy_paths", type=str, default=None,
                    help="Comma-separated folders or tokens_*.npy/reference_*.npy files for test set.")
-    p.add_argument("--group_by", type=str, default="folder", choices=["folder", "file", "record"],
-                   help="Auto split granularity: folder/file keeps groups together; record shuffles all reads across files before split.")
+    p.add_argument("--group_by", type=str, default="folder", choices=["folder", "file", "record", "record_per_file"],
+                   help="Auto split granularity: folder/file keeps groups together; record shuffles all reads across files before split; record_per_file splits records inside each file.")
     p.add_argument("--recursive", action="store_true",
                    help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
     p.add_argument("--token_offset", type=int, default=0,
@@ -609,6 +761,10 @@ def parse_args():
     p.add_argument("--val_ratio", type=float, default=0.1)
     p.add_argument("--test_ratio", type=float, default=0.1)
     p.add_argument("--split_seed", type=int, default=42)
+    p.add_argument("--streaming", action="store_true",
+                   help="Use IterableDataset streaming mode to reduce RAM usage for very large datasets.")
+    p.add_argument("--shuffle_buffer_size", type=int, default=0,
+                   help="Buffer size for streaming shuffle (0 disables buffer shuffle).")
 
     p.add_argument("--model_name_or_path", type=str, required=True,
                    help="Backbone model path for hidden/embedding; VQ tokenizer checkpoint path for vq_embedding.")
@@ -636,13 +792,18 @@ def parse_args():
 
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_epochs", type=int, default=50)
+    p.add_argument("--steps_per_epoch", type=int, default=0,
+                   help="Optional override for streaming when dataloader length is unknown (0=auto estimate).")
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--quick", action="store_true",
                    help="Quick mode alias: freeze backbone + ctc_crf_state_len=5 + ctc_crf_blank_score=0 + head_output_scale=5 + head_output_activation=tanh + head_type=ctc_crf + pre_ctc_module=none.")
 
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-3)
-    p.add_argument("--warmup_ratio", type=float, default=0.02)
+    p.add_argument("--warmup_ratio", type=float, default=0.02,
+                   help="Warmup ratio over total training steps (used when --warmup_steps < 0).")
+    p.add_argument("--warmup_steps", type=int, default=-1,
+                   help="Absolute warmup steps. If >=0, overrides --warmup_ratio.")
     p.add_argument("--min_lr", type=float, default=1e-5)
 
     p.add_argument("--seed", type=int, default=42)
@@ -657,6 +818,8 @@ def parse_args():
                    help="Optional W&B group name (useful for grouping condition sweeps).")
     p.add_argument("--wandb_job_type", type=str, default="train",
                    help="W&B job_type for this run.")
+    p.add_argument("--wandb_log_alignment_every", type=int, default=0,
+                   help="If >0, run test evaluation and log one test alignment heatmap to W&B every N epochs.")
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
@@ -671,7 +834,7 @@ def parse_args():
 
     # ✅ save frequency controls (minimal)
     p.add_argument("--save_every", type=int, default=1,
-                   help="Save ckpt_last.pt every N epochs (default 1).")
+                   help="Every N epochs, save rolling ckpt_last.pt and snapshot ckpt_epoch_<epoch>.pt (default 1).")
     p.add_argument("--save_best", action="store_true",
                    help="Save ckpt_best.pt based on best val_acc (default off unless provided).")
     p.add_argument("--freeze_backbone", action="store_true",
@@ -746,8 +909,13 @@ def main():
         backend=backend,
         timeout=timedelta(minutes=30),
     )
+    dataloader_config = DataLoaderConfiguration(
+        dispatch_batches=False if args.streaming else None,
+        split_batches=False,
+    )
     accelerator = Accelerator(
         kwargs_handlers=[ddp_kwargs, init_pg_kwargs],
+        dataloader_config=dataloader_config,
         mixed_precision="fp16" if args.amp and torch.cuda.is_available() else "no",
         log_with="wandb" if args.use_wandb and wandb is not None else None,
     )
@@ -777,6 +945,11 @@ def main():
             f"[FeatureSource] source={args.feature_source} hidden_layer={args.hidden_layer} "
             f"learnable_fuse_last_n_layers={args.learnable_fuse_last_n_layers}"
         )
+        if args.streaming:
+            logger.info(
+                f"[Data] streaming enabled (shuffle_buffer_size={args.shuffle_buffer_size}, "
+                "record-level splits use deterministic hash assignment)"
+            )
         if args.quick:
             logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=0, head_output_scale=5, head_output_activation=tanh, head_type=ctc_crf, pre_ctc_module=none")
 
@@ -840,29 +1013,142 @@ def main():
 
     if using_npy:
         if train_npy_paths or val_npy_paths or test_npy_paths:
-            train_pairs = scan_npy_pairs(train_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
-            val_pairs = scan_npy_pairs(val_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if val_npy_paths else []
-            test_pairs = scan_npy_pairs(test_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if test_npy_paths else []
-            train_dataset = MultiNpySignalRefDataset(train_pairs, token_offset=args.token_offset)
-            val_dataset = MultiNpySignalRefDataset(val_pairs, token_offset=args.token_offset) if len(val_pairs) else None
-            test_dataset = MultiNpySignalRefDataset(test_pairs, token_offset=args.token_offset) if len(test_pairs) else None
+            scan_group = args.group_by if args.group_by not in ("record", "record_per_file") else "file"
+            train_pairs = scan_npy_pairs(train_npy_paths, group_by=scan_group, recursive=args.recursive)
+            val_pairs = scan_npy_pairs(val_npy_paths, group_by=scan_group, recursive=args.recursive) if val_npy_paths else []
+            test_pairs = scan_npy_pairs(test_npy_paths, group_by=scan_group, recursive=args.recursive) if test_npy_paths else []
+            if args.streaming:
+                train_dataset = StreamingNpySignalRefDataset(
+                    npy_pairs=train_pairs,
+                    split_name="train",
+                    split_mode="file",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    test_ratio=0.0,
+                    seed=args.split_seed,
+                    token_offset=args.token_offset,
+                    shuffle_buffer_size=args.shuffle_buffer_size,
+                )
+                val_dataset = StreamingNpySignalRefDataset(
+                    npy_pairs=val_pairs,
+                    split_name="train",
+                    split_mode="file",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    test_ratio=0.0,
+                    seed=args.split_seed,
+                    token_offset=args.token_offset,
+                ) if len(val_pairs) else None
+                test_dataset = StreamingNpySignalRefDataset(
+                    npy_pairs=test_pairs,
+                    split_name="train",
+                    split_mode="file",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    test_ratio=0.0,
+                    seed=args.split_seed,
+                    token_offset=args.token_offset,
+                ) if len(test_pairs) else None
+            else:
+                train_dataset = MultiNpySignalRefDataset(train_pairs, token_offset=args.token_offset)
+                val_dataset = MultiNpySignalRefDataset(val_pairs, token_offset=args.token_offset) if len(val_pairs) else None
+                test_dataset = MultiNpySignalRefDataset(test_pairs, token_offset=args.token_offset) if len(test_pairs) else None
         else:
             if not args.npy_paths:
                 raise ValueError("Provide --npy_paths or explicit --train_npy_paths/--val_npy_paths/--test_npy_paths.")
             npy_paths = [x.strip() for x in args.npy_paths.split(",") if x.strip()]
-            npy_pairs = scan_npy_pairs(npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
+            npy_pairs = scan_npy_pairs(
+                npy_paths,
+                group_by=args.group_by if args.group_by not in ("record", "record_per_file") else "file",
+                recursive=args.recursive,
+            )
             if args.group_by == "record":
-                all_dataset = MultiNpySignalRefDataset(npy_pairs, token_offset=args.token_offset)
-                train_idx, val_idx, test_idx = split_indices(
-                    len(all_dataset),
-                    train_ratio=args.train_ratio,
-                    val_ratio=args.val_ratio,
-                    test_ratio=args.test_ratio,
-                    seed=args.split_seed,
-                )
-                train_dataset = Subset(all_dataset, train_idx)
-                val_dataset = Subset(all_dataset, val_idx) if len(val_idx) else None
-                test_dataset = Subset(all_dataset, test_idx) if len(test_idx) else None
+                if args.streaming:
+                    train_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=npy_pairs,
+                        split_name="train",
+                        split_mode="record",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                        shuffle_buffer_size=args.shuffle_buffer_size,
+                    )
+                    val_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=npy_pairs,
+                        split_name="val",
+                        split_mode="record",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if args.val_ratio > 0 else None
+                    test_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=npy_pairs,
+                        split_name="test",
+                        split_mode="record",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if args.test_ratio > 0 else None
+                else:
+                    all_dataset = MultiNpySignalRefDataset(npy_pairs, token_offset=args.token_offset)
+                    train_idx, val_idx, test_idx = split_indices(
+                        len(all_dataset),
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                    )
+                    train_dataset = Subset(all_dataset, train_idx)
+                    val_dataset = Subset(all_dataset, val_idx) if len(val_idx) else None
+                    test_dataset = Subset(all_dataset, test_idx) if len(test_idx) else None
+            elif args.group_by == "record_per_file":
+                if args.streaming:
+                    train_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=npy_pairs,
+                        split_name="train",
+                        split_mode="record_per_file",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                        shuffle_buffer_size=args.shuffle_buffer_size,
+                    )
+                    val_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=npy_pairs,
+                        split_name="val",
+                        split_mode="record_per_file",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if args.val_ratio > 0 else None
+                    test_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=npy_pairs,
+                        split_name="test",
+                        split_mode="record_per_file",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if args.test_ratio > 0 else None
+                else:
+                    train_dataset, val_dataset, test_dataset = split_npy_records_per_file(
+                        npy_pairs=npy_pairs,
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    )
             else:
                 train_pairs, val_pairs, test_pairs = split_npy_pairs_by_group(
                     npy_pairs,
@@ -871,40 +1157,191 @@ def main():
                     test_ratio=args.test_ratio,
                     seed=args.split_seed,
                 )
-                train_dataset = MultiNpySignalRefDataset(train_pairs, token_offset=args.token_offset)
-                val_dataset = MultiNpySignalRefDataset(val_pairs, token_offset=args.token_offset) if len(val_pairs) else None
-                test_dataset = MultiNpySignalRefDataset(test_pairs, token_offset=args.token_offset) if len(test_pairs) else None
+                if args.streaming:
+                    train_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=train_pairs,
+                        split_name="train",
+                        split_mode="file",
+                        train_ratio=1.0,
+                        val_ratio=0.0,
+                        test_ratio=0.0,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                        shuffle_buffer_size=args.shuffle_buffer_size,
+                    )
+                    val_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=val_pairs,
+                        split_name="train",
+                        split_mode="file",
+                        train_ratio=1.0,
+                        val_ratio=0.0,
+                        test_ratio=0.0,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if len(val_pairs) else None
+                    test_dataset = StreamingNpySignalRefDataset(
+                        npy_pairs=test_pairs,
+                        split_name="train",
+                        split_mode="file",
+                        train_ratio=1.0,
+                        val_ratio=0.0,
+                        test_ratio=0.0,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if len(test_pairs) else None
+                else:
+                    train_dataset = MultiNpySignalRefDataset(train_pairs, token_offset=args.token_offset)
+                    val_dataset = MultiNpySignalRefDataset(val_pairs, token_offset=args.token_offset) if len(val_pairs) else None
+                    test_dataset = MultiNpySignalRefDataset(test_pairs, token_offset=args.token_offset) if len(test_pairs) else None
 
         if is_main_process(accelerator):
-            if args.group_by == "record":
-                logger.info(f"[Data] split by record: train={len(train_dataset)} val={len(val_dataset) if val_dataset is not None else 0} test={len(test_dataset) if test_dataset is not None else 0}")
+            if args.group_by in ("record", "record_per_file"):
+                logger.info(
+                    f"[Data] split by {args.group_by}: "
+                    f"train={_safe_len_str(train_dataset)} "
+                    f"val={_safe_len_str(val_dataset) if val_dataset is not None else '0'} "
+                    f"test={_safe_len_str(test_dataset) if test_dataset is not None else '0'}"
+                )
             else:
                 logger.info(f"[Data] train_pairs={len(train_pairs)} val_pairs={len(val_pairs)} test_pairs={len(test_pairs)}")
     else:
         if train_jsonl_paths or val_jsonl_paths or test_jsonl_paths:
-            train_files = scan_jsonl_files(train_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
-            val_files = scan_jsonl_files(val_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if val_jsonl_paths else []
-            test_files = scan_jsonl_files(test_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if test_jsonl_paths else []
-            train_dataset = MultiJsonlSignalRefDataset(train_files, token_offset=args.token_offset)
-            val_dataset = MultiJsonlSignalRefDataset(val_files, token_offset=args.token_offset) if len(val_files) else None
-            test_dataset = MultiJsonlSignalRefDataset(test_files, token_offset=args.token_offset) if len(test_files) else None
+            scan_group = args.group_by if args.group_by not in ("record", "record_per_file") else "file"
+            train_files = scan_jsonl_files(train_jsonl_paths, group_by=scan_group, recursive=args.recursive)
+            val_files = scan_jsonl_files(val_jsonl_paths, group_by=scan_group, recursive=args.recursive) if val_jsonl_paths else []
+            test_files = scan_jsonl_files(test_jsonl_paths, group_by=scan_group, recursive=args.recursive) if test_jsonl_paths else []
+            if args.streaming:
+                train_dataset = StreamingJsonlSignalRefDataset(
+                    jsonl_files=train_files,
+                    split_name="train",
+                    split_mode="file",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    test_ratio=0.0,
+                    seed=args.split_seed,
+                    token_offset=args.token_offset,
+                    shuffle_buffer_size=args.shuffle_buffer_size,
+                )
+                val_dataset = StreamingJsonlSignalRefDataset(
+                    jsonl_files=val_files,
+                    split_name="train",
+                    split_mode="file",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    test_ratio=0.0,
+                    seed=args.split_seed,
+                    token_offset=args.token_offset,
+                ) if len(val_files) else None
+                test_dataset = StreamingJsonlSignalRefDataset(
+                    jsonl_files=test_files,
+                    split_name="train",
+                    split_mode="file",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    test_ratio=0.0,
+                    seed=args.split_seed,
+                    token_offset=args.token_offset,
+                ) if len(test_files) else None
+            else:
+                train_dataset = MultiJsonlSignalRefDataset(train_files, token_offset=args.token_offset)
+                val_dataset = MultiJsonlSignalRefDataset(val_files, token_offset=args.token_offset) if len(val_files) else None
+                test_dataset = MultiJsonlSignalRefDataset(test_files, token_offset=args.token_offset) if len(test_files) else None
         else:
             if not args.jsonl_paths:
                 raise ValueError("Provide --jsonl_paths or explicit --train_jsonl_paths/--val_jsonl_paths/--test_jsonl_paths.")
             jsonl_paths = [x.strip() for x in args.jsonl_paths.split(",") if x.strip()]
-            jsonl_files = scan_jsonl_files(jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
+            jsonl_files = scan_jsonl_files(
+                jsonl_paths,
+                group_by=args.group_by if args.group_by not in ("record", "record_per_file") else "file",
+                recursive=args.recursive,
+            )
             if args.group_by == "record":
-                all_dataset = MultiJsonlSignalRefDataset(jsonl_files, token_offset=args.token_offset)
-                train_idx, val_idx, test_idx = split_indices(
-                    len(all_dataset),
-                    train_ratio=args.train_ratio,
-                    val_ratio=args.val_ratio,
-                    test_ratio=args.test_ratio,
-                    seed=args.split_seed,
-                )
-                train_dataset = Subset(all_dataset, train_idx)
-                val_dataset = Subset(all_dataset, val_idx) if len(val_idx) else None
-                test_dataset = Subset(all_dataset, test_idx) if len(test_idx) else None
+                if args.streaming:
+                    train_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=jsonl_files,
+                        split_name="train",
+                        split_mode="record",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                        shuffle_buffer_size=args.shuffle_buffer_size,
+                    )
+                    val_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=jsonl_files,
+                        split_name="val",
+                        split_mode="record",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if args.val_ratio > 0 else None
+                    test_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=jsonl_files,
+                        split_name="test",
+                        split_mode="record",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if args.test_ratio > 0 else None
+                else:
+                    all_dataset = MultiJsonlSignalRefDataset(jsonl_files, token_offset=args.token_offset)
+                    train_idx, val_idx, test_idx = split_indices(
+                        len(all_dataset),
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                    )
+                    train_dataset = Subset(all_dataset, train_idx)
+                    val_dataset = Subset(all_dataset, val_idx) if len(val_idx) else None
+                    test_dataset = Subset(all_dataset, test_idx) if len(test_idx) else None
+            elif args.group_by == "record_per_file":
+                if args.streaming:
+                    train_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=jsonl_files,
+                        split_name="train",
+                        split_mode="record_per_file",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                        shuffle_buffer_size=args.shuffle_buffer_size,
+                    )
+                    val_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=jsonl_files,
+                        split_name="val",
+                        split_mode="record_per_file",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if args.val_ratio > 0 else None
+                    test_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=jsonl_files,
+                        split_name="test",
+                        split_mode="record_per_file",
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if args.test_ratio > 0 else None
+                else:
+                    train_dataset, val_dataset, test_dataset = split_jsonl_records_per_file(
+                        jsonl_files=jsonl_files,
+                        train_ratio=args.train_ratio,
+                        val_ratio=args.val_ratio,
+                        test_ratio=args.test_ratio,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    )
             else:
                 train_files, val_files, test_files = split_jsonl_files_by_group(
                     jsonl_files,
@@ -913,13 +1350,51 @@ def main():
                     test_ratio=args.test_ratio,
                     seed=args.split_seed,
                 )
-                train_dataset = MultiJsonlSignalRefDataset(train_files, token_offset=args.token_offset)
-                val_dataset = MultiJsonlSignalRefDataset(val_files, token_offset=args.token_offset) if len(val_files) else None
-                test_dataset = MultiJsonlSignalRefDataset(test_files, token_offset=args.token_offset) if len(test_files) else None
+                if args.streaming:
+                    train_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=train_files,
+                        split_name="train",
+                        split_mode="file",
+                        train_ratio=1.0,
+                        val_ratio=0.0,
+                        test_ratio=0.0,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                        shuffle_buffer_size=args.shuffle_buffer_size,
+                    )
+                    val_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=val_files,
+                        split_name="train",
+                        split_mode="file",
+                        train_ratio=1.0,
+                        val_ratio=0.0,
+                        test_ratio=0.0,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if len(val_files) else None
+                    test_dataset = StreamingJsonlSignalRefDataset(
+                        jsonl_files=test_files,
+                        split_name="train",
+                        split_mode="file",
+                        train_ratio=1.0,
+                        val_ratio=0.0,
+                        test_ratio=0.0,
+                        seed=args.split_seed,
+                        token_offset=args.token_offset,
+                    ) if len(test_files) else None
+                else:
+                    train_dataset = MultiJsonlSignalRefDataset(train_files, token_offset=args.token_offset)
+                    val_dataset = MultiJsonlSignalRefDataset(val_files, token_offset=args.token_offset) if len(val_files) else None
+                    test_dataset = MultiJsonlSignalRefDataset(test_files, token_offset=args.token_offset) if len(test_files) else None
 
         if is_main_process(accelerator):
-            if args.group_by == "record":
-                logger.info(f"[Data] split by record: train={len(train_dataset)} val={len(val_dataset) if val_dataset is not None else 0} test={len(test_dataset) if test_dataset is not None else 0}")
+            if args.group_by in ("record", "record_per_file"):
+                logger.info(
+                    f"[Data] split by {args.group_by}: "
+                    f"train={_safe_len_str(train_dataset)} "
+                    f"val={_safe_len_str(val_dataset) if val_dataset is not None else '0'} "
+                    f"test={_safe_len_str(test_dataset) if test_dataset is not None else '0'}"
+                )
             else:
                 logger.info(f"[Data] train_files={len(train_files)} val_files={len(val_files)} test_files={len(test_files)}")
 
@@ -931,7 +1406,7 @@ def main():
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=not isinstance(train_dataset, IterableDataset),
         num_workers=args.num_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=False,
@@ -962,9 +1437,26 @@ def main():
 
     # ---- optimizer/scheduler/loss ----
     optimizer = build_adamw_with_no_decay(model.named_parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    steps_per_epoch = len(train_loader)
+    steps_per_epoch = _safe_len(train_loader)
+    if steps_per_epoch is None:
+        if args.steps_per_epoch > 0:
+            steps_per_epoch = int(args.steps_per_epoch)
+        else:
+            est_train_size = _estimate_streaming_train_size(train_dataset)
+            if est_train_size is None:
+                raise ValueError("Could not infer streaming steps_per_epoch; please set --steps_per_epoch > 0.")
+            steps_per_epoch = max(int(math.ceil(est_train_size / max(int(args.batch_size), 1))), 1)
+            if is_main_process(accelerator):
+                logger.info(
+                    f"[Data] Auto-estimated steps_per_epoch={steps_per_epoch} "
+                    f"(estimated_train_size={est_train_size}, batch_size={args.batch_size}). "
+                    "Set --steps_per_epoch to override."
+                )
     total_steps = steps_per_epoch * args.num_epochs
-    warmup_steps = int(total_steps * args.warmup_ratio)
+    if int(args.warmup_steps) >= 0:
+        warmup_steps = int(args.warmup_steps)
+    else:
+        warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler, sched_name = build_scheduler(optimizer, total_steps, warmup_steps, args.min_lr, logger, accelerator)
     model, optimizer, train_loader, scheduler = accelerator.prepare(model, optimizer, train_loader, scheduler)
     if val_loader is not None:
@@ -987,26 +1479,13 @@ def main():
             logger=logger,
         )
 
-    # ---- wandb ----
-    use_wandb = bool(args.use_wandb and wandb is not None and is_main_process(accelerator))
-    if args.use_wandb and wandb is None and is_main_process(accelerator):
-        logger.warning("[wandb] wandb not installed; pip install wandb")
-
-    if use_wandb:
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.wandb_run_name,
-            group=args.wandb_group,
-            job_type=args.wandb_job_type,
-            config=vars(args),
-        )
-
     # ---- resume (after model+optim+sched created) ----
     start_epoch = 1
     best_pbma = -1.0
+    global_step = 0
+    resume_wandb_run_id: Optional[str] = None
     if args.resume_ckpt:
-        se, bp = load_checkpoint(
+        se, bp, gs, wrid = load_checkpoint(
             args.resume_ckpt,
             accelerator,
             model,
@@ -1016,13 +1495,37 @@ def main():
             logger=logger if is_main_process(accelerator) else None,
         )
         start_epoch = se
+        global_step = int(gs)
+        resume_wandb_run_id = wrid if isinstance(wrid, str) and wrid else None
         if bp is not None:
             try:
                 best_pbma = float(bp)
             except Exception:
                 pass
         if is_main_process(accelerator):
-            logger.info(f"[Resume] start_epoch={start_epoch}, best_acc={best_pbma}")
+            logger.info(
+                f"[Resume] start_epoch={start_epoch}, best_acc={best_pbma}, "
+                f"global_step={global_step}, wandb_run_id={resume_wandb_run_id}"
+            )
+
+    # ---- wandb ----
+    use_wandb = bool(args.use_wandb and wandb is not None and is_main_process(accelerator))
+    if args.use_wandb and wandb is None and is_main_process(accelerator):
+        logger.warning("[wandb] wandb not installed; pip install wandb")
+
+    if use_wandb:
+        init_kwargs = dict(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type=args.wandb_job_type,
+            config=vars(args),
+        )
+        if resume_wandb_run_id:
+            init_kwargs["id"] = resume_wandb_run_id
+            init_kwargs["resume"] = "must"
+        wandb.init(**init_kwargs)
 
     # ---- loop ----
     train_losses, val_losses, val_accs = [], [], []
@@ -1049,7 +1552,7 @@ def main():
         logger.info(f"[Decoder] mode={decoder_mode} use_amp={use_amp}")
 
     for epoch in range(start_epoch, args.num_epochs + 1):
-        tr_loss = train_one_epoch(
+        tr_loss, global_step = train_one_epoch(
             accelerator,
             model,
             train_loader,
@@ -1062,6 +1565,7 @@ def main():
             use_amp,
             args.clip_grad_norm,
             args.head_type,
+            global_step_start=global_step,
         )
         train_losses.append(tr_loss)
 
@@ -1109,12 +1613,75 @@ def main():
                     }
                     if decoder_mode == "ctc_crf":
                         payload["val/crf_acc"] = float(val_crf_acc)
-                    wandb.log(payload)
+                    wandb.log(payload, step=int(global_step))
+        if args.wandb_log_alignment_every > 0 and (epoch % args.wandb_log_alignment_every == 0):
+            if test_loader is not None:
+                epoch_test_loss, epoch_test_acc, epoch_test_crf_acc, epoch_test_cov, epoch_test_blank, epoch_test_nonzero_len = eval_one_epoch(
+                    accelerator,
+                    model,
+                    test_loader,
+                    device,
+                    "test",
+                    args.ctc_crf_blank_score,
+                    args.koi_blank_score,
+                    args.acc_balanced,
+                    args.acc_min_coverage,
+                    use_amp,
+                    decoder_mode,
+                    args.head_type,
+                )
+                if is_main_process(accelerator):
+                    logger.info(
+                        f"[Test@Epoch] epoch={epoch} loss={epoch_test_loss:.4f} acc={epoch_test_acc:.4f} "
+                        f"coverage={epoch_test_cov:.4f} blank={epoch_test_blank:.4f} nonzero_len={epoch_test_nonzero_len:.2f}"
+                    )
+                    if use_wandb and wandb is not None:
+                        payload = {
+                            "test/periodic_loss": float(epoch_test_loss),
+                            "test/periodic_acc": float(epoch_test_acc),
+                            "test/periodic_coverage": float(epoch_test_cov),
+                            "test/periodic_blank": float(epoch_test_blank),
+                            "test/periodic_nonzero_len": float(epoch_test_nonzero_len),
+                            "epoch": epoch,
+                        }
+                        if decoder_mode == "ctc_crf":
+                            payload["test/periodic_crf_acc"] = float(epoch_test_crf_acc)
+                        wandb.log(payload, step=int(global_step))
+                if use_wandb and wandb is not None:
+                    log_alignment_to_wandb(
+                        accelerator=accelerator,
+                        model=model,
+                        loader=test_loader,
+                        device=device,
+                        use_amp=use_amp,
+                        decoder_mode=decoder_mode,
+                        blank_idx=BLANK_IDX,
+                        koi_blank_score=float(args.koi_blank_score),
+                        image_key="test/alignment",
+                        epoch=epoch,
+                        global_step=global_step,
+                    )
+            elif is_main_process(accelerator):
+                logger.warning(
+                    f"[Test@Epoch] --wandb_log_alignment_every={args.wandb_log_alignment_every} is set, "
+                    "but no test split is available; skipping periodic test eval/alignment logging."
+                )
 
         # ---- checkpoint save ----
         accelerator.wait_for_everyone()
         if is_main_process(accelerator) and (epoch % max(args.save_every, 1) == 0):
             last_path = os.path.join(args.output_dir, "ckpt_last.pt")
+            epoch_path = os.path.join(args.output_dir, f"ckpt_epoch_{epoch}.pt")
+            current_wandb_run_id = (
+                str(getattr(wandb.run, "id", "")) if (use_wandb and wandb is not None and wandb.run is not None) else resume_wandb_run_id
+            )
+            ckpt_extra = {
+                "train_loss": tr_loss,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+                "global_step": int(global_step),
+                "wandb_run_id": current_wandb_run_id,
+            }
             save_checkpoint(
                 last_path,
                 accelerator,
@@ -1123,14 +1690,27 @@ def main():
                 scheduler=scheduler,
                 epoch=epoch,
                 best_pbma=best_pbma,
-                extra={"train_loss": tr_loss, "val_loss": val_loss, "val_acc": val_acc},
+                extra=ckpt_extra,
             )
-            logger.info(f"[CKPT] saved {last_path}")
+            save_checkpoint(
+                epoch_path,
+                accelerator,
+                model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                best_pbma=best_pbma,
+                extra=ckpt_extra,
+            )
+            logger.info(f"[CKPT] saved {last_path} and {epoch_path}")
 
         if is_main_process(accelerator) and args.save_best and (val_acc is not None):
             if float(val_acc) > float(best_pbma):
                 best_pbma = float(val_acc)
                 best_path = os.path.join(args.output_dir, "ckpt_best.pt")
+                current_wandb_run_id = (
+                    str(getattr(wandb.run, "id", "")) if (use_wandb and wandb is not None and wandb.run is not None) else resume_wandb_run_id
+                )
                 save_checkpoint(
                     best_path,
                     accelerator,
@@ -1139,12 +1719,18 @@ def main():
                     scheduler=scheduler,
                     epoch=epoch,
                     best_pbma=best_pbma,
-                    extra={"train_loss": tr_loss, "val_loss": val_loss, "val_acc": val_acc},
+                    extra={
+                        "train_loss": tr_loss,
+                        "val_loss": val_loss,
+                        "val_acc": val_acc,
+                        "global_step": int(global_step),
+                        "wandb_run_id": current_wandb_run_id,
+                    },
                 )
                 logger.info(f"[CKPT] new best acc={best_pbma:.4f} @ epoch={epoch}, saved {best_path}")
 
         if use_wandb and wandb is not None and is_main_process(accelerator):
-            wandb.log({"epoch": epoch, "train/epoch_loss": float(tr_loss)})
+            wandb.log({"epoch": epoch, "train/epoch_loss": float(tr_loss)}, step=int(global_step))
 
     # ---- test ----
     if test_loader is not None:
@@ -1183,7 +1769,7 @@ def main():
                 }
                 if decoder_mode == "ctc_crf":
                     payload["test/crf_acc"] = float(test_crf_acc)
-                wandb.log(payload)
+                wandb.log(payload, step=int(global_step))
 
     # ---- final save curves/csv ----
     if is_main_process(accelerator):
@@ -1198,49 +1784,19 @@ def main():
     if use_wandb and wandb is not None and is_main_process(accelerator):
         loader = test_loader if test_loader is not None else val_loader
         if loader is not None:
-            batch = next(iter(loader))
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch.get("attention_mask")
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(device)
-            with torch.no_grad():
-                with accelerator.autocast() if use_amp else nullcontext():
-                    logits_btc = model(input_ids, attention_mask=attention_mask)
-                logits_tbc = logits_btc.transpose(0, 1)
-            input_lengths = resolve_input_lengths(
-                input_ids,
-                attention_mask=attention_mask,
-                input_lengths=batch.get("input_lengths"),
+            log_alignment_to_wandb(
+                accelerator=accelerator,
+                model=model,
+                loader=loader,
+                device=device,
+                use_amp=use_amp,
+                decoder_mode=decoder_mode,
+                blank_idx=BLANK_IDX,
+                koi_blank_score=float(args.koi_blank_score),
+                image_key="final/base_alignment",
+                epoch=args.num_epochs,
+                global_step=global_step,
             )
-            if decoder_mode == "koi":
-                pred_seqs = koi_beam_search_decode(
-                    logits_tbc,
-                    blank_score=float(args.koi_blank_score),
-                    input_lengths=input_lengths,
-                )
-            elif decoder_mode == "ctc_viterbi":
-                pred_seqs = ctc_viterbi_decode(
-                    logits_tbc,
-                    input_lengths=input_lengths,
-                    blank_idx=BLANK_IDX,
-                )
-            else:
-                pred_seqs = []
-                input_len_list = input_lengths.detach().cpu().tolist()
-                for idx, input_len in enumerate(input_len_list):
-                    step_len = int(input_len)
-                    if step_len <= 0:
-                        pred_seqs.append([])
-                        continue
-                    decoded_ids = ctc_crf_decode(
-                        logits_tbc[:step_len, idx : idx + 1, :].float(),
-                        blank_idx=BLANK_IDX,
-                    )[0]
-                    pred_seqs.append(decoded_ids[:step_len])
-            ref_seqs = batch["target_seqs"]
-            fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
-            wandb.log({"final/base_alignment": wandb.Image(fig)})
-            plt.close(fig)
 
     if use_wandb and wandb is not None:
         wandb.finish()

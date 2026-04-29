@@ -14,4 +14,3 @@ from .metrics import (
     batch_bonito_accuracy,
     plot_curves,
 )
-
