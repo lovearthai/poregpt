@@ -396,7 +396,7 @@ def load_checkpoint(path: str,
 
 def train_one_epoch(
     accelerator: Accelerator,
-    eval_loader,
+    val_loader,
     model,
     data_loader,
     optimizer,
