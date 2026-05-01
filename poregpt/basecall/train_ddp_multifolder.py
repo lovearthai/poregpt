@@ -511,8 +511,6 @@ def train_one_epoch(
                 decoder_mode,
                 args.head_type,
             )
-            val_losses.append(val_loss)
-            val_accs.append(val_acc)
 
             if is_main_process(accelerator):
                 if decoder_mode == "ctc_crf":
