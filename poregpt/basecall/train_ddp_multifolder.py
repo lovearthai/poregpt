@@ -395,6 +395,7 @@ def load_checkpoint(path: str,
 # -------------------- train/eval --------------------
 
 def train_one_epoch(
+    args,
     accelerator: Accelerator,
     val_loader,
     model,
@@ -404,6 +405,7 @@ def train_one_epoch(
     device,
     log_interval: int,
     eval_interval:int,
+    decoder_mode,
     use_wandb: bool,
     ctc_crf_blank_score: float,
     use_amp: bool,
@@ -1688,6 +1690,7 @@ def main():
                 )
 
         tr_loss, global_step = train_one_epoch(
+            args,
             accelerator,
             val_loader,
             model,
@@ -1697,6 +1700,7 @@ def main():
             device,
             args.log_interval,
             args.eval_interval,
+            decoder_mode,
             use_wandb,
             args.ctc_crf_blank_score,
             use_amp,
