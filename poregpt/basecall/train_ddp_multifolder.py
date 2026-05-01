@@ -513,16 +513,6 @@ def train_one_epoch(
             )
 
             if is_main_process(accelerator):
-                if decoder_mode == "ctc_crf":
-                    logger.info(
-                        f"[Val] epoch={epoch} step={step} loss={val_loss:.4f} acc={val_acc:.4f} "
-                        f"coverage={val_cov:.4f} blank={val_blank:.4f} nonzero_len={val_nonzero_len:.2f}"
-                    )
-                else:
-                    logger.info(
-                        f"[Val] epoch={epoch} step={step} loss={val_loss:.4f} acc={val_acc:.4f} "
-                        f"coverage={val_cov:.4f} blank={val_blank:.4f} nonzero_len={val_nonzero_len:.2f}"
-                    )
                 if use_wandb and wandb is not None:
                     payload = {
                         "val/loss": float(val_loss),
@@ -530,7 +520,6 @@ def train_one_epoch(
                         "val/coverage": float(val_cov),
                         "val/blank": float(val_blank),
                         "val/nonzero_len": float(val_nonzero_len),
-                        "epoch": epoch,
                     }
                     if decoder_mode == "ctc_crf":
                         payload["val/crf_acc"] = float(val_crf_acc)
