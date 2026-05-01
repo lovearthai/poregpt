@@ -1689,7 +1689,7 @@ def main():
 
         tr_loss, global_step = train_one_epoch(
             accelerator,
-            val_loader=val_loader,
+            val_loader,
             model,
             train_loader,
             optimizer,
