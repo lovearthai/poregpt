@@ -396,18 +396,21 @@ def load_checkpoint(path: str,
 
 def train_one_epoch(
     accelerator: Accelerator,
+    eval_loader,
     model,
     data_loader,
     optimizer,
     scheduler,
     device,
     log_interval: int,
+    eval_interval:int,
     use_wandb: bool,
     ctc_crf_blank_score: float,
     use_amp: bool,
     clip_grad_norm: float,
     head_type: str,
     global_step_start: int = 0,
+
 ):
     model.train()
     total_loss, n_batches = 0.0, 0
@@ -474,6 +477,8 @@ def train_one_epoch(
         total_loss += float(loss.item())
         n_batches += 1
 
+
+
         if is_main_process(accelerator) and (step % log_interval == 0):
             lr = optimizer.param_groups[0]["lr"]
             step_den = total_steps_hint if total_steps_hint is not None else "?"
@@ -488,6 +493,48 @@ def train_one_epoch(
                     },
                     step=int(global_step),
                 )
+        # 在 for step, batch in it 循环内
+        if step % eval_interval == 0 and val_loader is not None:
+            val_loss, val_acc, val_crf_acc, val_cov, val_blank, val_nonzero_len = eval_one_epoch(
+                accelerator,
+                model,
+                val_loader,
+                device,
+                "val",
+                args.ctc_crf_blank_score,
+                args.koi_blank_score,
+                args.acc_balanced,
+                args.acc_min_coverage,
+                use_amp,
+                decoder_mode,
+                args.head_type,
+            )
+            val_losses.append(val_loss)
+            val_accs.append(val_acc)
+
+            if is_main_process(accelerator):
+                if decoder_mode == "ctc_crf":
+                    logger.info(
+                        f"[Val] epoch={epoch} step={step} loss={val_loss:.4f} acc={val_acc:.4f} "
+                        f"coverage={val_cov:.4f} blank={val_blank:.4f} nonzero_len={val_nonzero_len:.2f}"
+                    )
+                else:
+                    logger.info(
+                        f"[Val] epoch={epoch} step={step} loss={val_loss:.4f} acc={val_acc:.4f} "
+                        f"coverage={val_cov:.4f} blank={val_blank:.4f} nonzero_len={val_nonzero_len:.2f}"
+                    )
+                if use_wandb and wandb is not None:
+                    payload = {
+                        "val/loss": float(val_loss),
+                        "val/acc": float(val_acc),
+                        "val/coverage": float(val_cov),
+                        "val/blank": float(val_blank),
+                        "val/nonzero_len": float(val_nonzero_len),
+                        "epoch": epoch,
+                    }
+                    if decoder_mode == "ctc_crf":
+                        payload["val/crf_acc"] = float(val_crf_acc)
+                    wandb.log(payload, step=int(global_step))
 
     avg = total_loss / max(n_batches, 1)
     return reduce_mean(accelerator, avg, device), global_step
@@ -832,6 +879,7 @@ def parse_args():
 
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log_interval", type=int, default=100)
+    p.add_argument("--eval_interval", type=int, default=500)
     p.add_argument("--output_dir", type=str, default="./outputs_ddp")
 
     p.add_argument("--use_wandb", action="store_true")
@@ -1641,12 +1689,14 @@ def main():
 
         tr_loss, global_step = train_one_epoch(
             accelerator,
+            val_loader=val_loader,
             model,
             train_loader,
             optimizer,
             scheduler,
             device,
             args.log_interval,
+            args.eval_interval,
             use_wandb,
             args.ctc_crf_blank_score,
             use_amp,
