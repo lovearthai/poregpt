@@ -828,9 +828,9 @@ def parse_args():
     p.add_argument("--token_offset", type=int, default=0,
                    help="Add this offset to each <|bwav:ID|> token in input signal_str (e.g. 0->128).")
 
-    p.add_argument("--train_ratio", type=float, default=0.8)
-    p.add_argument("--val_ratio", type=float, default=0.1)
-    p.add_argument("--test_ratio", type=float, default=0.1)
+    p.add_argument("--train_ratio", type=float, default=0.98)
+    p.add_argument("--val_ratio", type=float, default=0.01)
+    p.add_argument("--test_ratio", type=float, default=0.01)
     p.add_argument("--split_seed", type=int, default=42)
     p.add_argument("--streaming", action="store_true",
                    help="Use IterableDataset streaming mode to reduce RAM usage for very large datasets.")
