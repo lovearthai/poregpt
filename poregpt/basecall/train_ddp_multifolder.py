@@ -72,7 +72,7 @@ try:
     import wandb
 except Exception:
     wandb = None
-
+from tqdm import tqdm
 
 # -------------------- distributed helpers --------------------
 

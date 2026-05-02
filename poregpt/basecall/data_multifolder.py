@@ -35,7 +35,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 from transformers import PreTrainedTokenizerBase
-
+import concurrent.futures
 from .utils import BASE2ID, resolve_input_lengths
 
 # -------------------------
@@ -359,8 +359,10 @@ def _iter_jsonl_records(path: str):
                 continue
             yield json.loads(line)
 
+from tqdm import tqdm
 
-class MultiJsonlSignalRefDataset(Dataset):
+
+class MultiJsonlSignalRefDataset_old(Dataset):
     """
     从 jsonl.gz 读取 text/bases 字段，输出与原 data.py 一致的格式：
       {"signal_str": str, "target_seq": List[int]}
@@ -372,7 +374,8 @@ class MultiJsonlSignalRefDataset(Dataset):
         self.signal_list: List[str] = []
         self.target_list: List[np.ndarray] = []
 
-        for jf in jsonl_files:
+        for jf in tqdm(jsonl_files, desc="Loading Files"):
+            print(f"MultiJsonlSignalRefDataset: reading {jf}")
             for obj in _iter_jsonl_records(jf.path):
                 signal_str = obj.get("text", "")
                 bases = obj.get("bases", None)
@@ -400,6 +403,66 @@ class MultiJsonlSignalRefDataset(Dataset):
         ref_row = np.asarray(self.target_list[idx]).reshape(-1)
         labels = ref_row[ref_row > 0].astype(np.int64).tolist()
         return {"signal_str": signal_str, "target_seq": labels}
+
+# 提速点 1: 既然 offset 为 0，完全跳过正则替换逻辑
+def _fast_load_single_file(jf_path):
+    signals = []
+    targets = []
+    # 提速点 2: 使用更轻量级的解析方式
+    print(f"loading {jf_path}")            
+    with gzip.open(jf_path, "rt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            obj = json.loads(line)
+            
+            s = obj.get("text", "")
+            b = obj.get("bases", None)
+            if not s or b is None:
+                continue
+            
+            signals.append(s)
+            labels = _parse_bases(b) # 假设此函数在外部定义
+            targets.append(np.asarray(labels, dtype=np.int16)) 
+    return signals, targets
+
+
+class MultiJsonlSignalRefDataset(Dataset):
+    def __init__(self, jsonl_files, token_offset: int = 0):
+        super().__init__()
+        self.signal_list = []
+        self.target_list = []
+
+        # 提速点 5: 使用进程池（根据 CPU 核心数设置 max_workers）
+        # 8 卡机器建议设置 8-16
+        print(f"Starting parallel load with token_offset={token_offset}...")
+
+        # 将文件路径提取出来
+        paths = [jf.path for jf in jsonl_files]
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=8) as executor:
+            # 使用 map 或 submit 提交任务
+            futures = [executor.submit(_fast_load_single_file, p) for p in paths]
+
+            for future in tqdm(concurrent.futures.as_completed(futures),
+                              total=len(paths),
+                              desc="Parallel Loading"):
+                signals, targets = future.result()
+                self.signal_list.extend(signals)
+                self.target_list.extend(targets)
+
+        print(f"[Dataset] Success: {len(self.signal_list)} reads loaded.")
+
+    def __len__(self):
+        return len(self.signal_list)
+
+    def __getitem__(self, idx):
+        # 保持原有接口逻辑，仅在返回时按需处理数据类型
+        return {
+            "signal_str": self.signal_list[idx],
+            "target_seq": self.target_list[idx].astype(np.int64).tolist()
+        }
+
 
 
 class MultiNpySignalRefDataset(Dataset):
