@@ -524,6 +524,7 @@ def train_one_epoch(
                     if decoder_mode == "ctc_crf":
                         payload["val/crf_acc"] = float(val_crf_acc)
                     wandb.log(payload, step=int(global_step))
+                    print(payload)
 
     avg = total_loss / max(n_batches, 1)
     return reduce_mean(accelerator, avg, device), global_step
